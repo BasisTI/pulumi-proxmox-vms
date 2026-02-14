@@ -1,0 +1,274 @@
+= pulumi-proxmox-vms
+
+This repository contains a Pulumi component for quickly creating and managing Proxmox VE virtual machines from a Linux template using cloud-init.
+
+== Features
+
+* Create multiple VMs by cloning a Proxmox template
+* Automatic network configuration with static IP addresses via cloud-init
+* Configurable CPU, memory, and disk settings per VM
+* Tag-based VM grouping (replaces vSphere folder structure)
+* QEMU guest agent support
+* HA migration drift protection via `IgnoreChanges` on `nodeName`
+* Easy configuration through Pulumi YAML files
+
+== Installation
+
+Add this component to your Go project:
+
+[source,bash]
+----
+go get github.com/BasisTI/pulumi-proxmox-vms
+----
+
+== Usage
+
+=== Basic Usage
+
+The component provides two ways to create VMs:
+
+1. **Automatic configuration reading** (recommended):
++
+[source,go]
+----
+import (
+    "github.com/BasisTI/pulumi-proxmox-vms/proxmox-vms"
+    "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+)
+
+func main() {
+    pulumi.Run(func(ctx *pulumi.Context) error {
+        // Create VMs using configuration from Pulumi YAML files
+        proxmoxVms, err := proxmox_vms.NewProxmoxVmsFromConfig(ctx, "my-vms")
+        if err != nil {
+            return err
+        }
+
+        // Export VM IDs
+        var vmIds []pulumi.StringOutput
+        for _, vm := range proxmoxVms.VirtualMachines {
+            vmIds = append(vmIds, vm.ID().ToStringOutput())
+        }
+        ctx.Export("vmIds", pulumi.ToStringArrayOutput(vmIds))
+        return nil
+    })
+}
+----
+
+2. **Manual configuration**:
++
+[source,go]
+----
+args := &proxmox_vms.ProxmoxVmsArgs{
+    Vms:        []proxmox_vms.VmData{...},
+    ProxmoxCfg: proxmox_vms.ProxmoxCfg{...},
+    NetworkCfg: proxmox_vms.NetworkCfg{...},
+}
+proxmoxVms, err := proxmox_vms.NewProxmoxVms(ctx, "my-vms", args)
+----
+
+== Configuration
+
+When using `NewProxmoxVmsFromConfig`, the component automatically reads three required configuration objects and one optional parameter from your Pulumi YAML files:
+
+=== Optional Configuration Parameters
+
+==== `makeAlias` - Resource Aliasing
+
+[source,yaml]
+----
+makeAlias: true
+----
+
+.MakeAlias Parameter
+[cols="1,1,3"]
+|===
+|Field |Type |Description
+
+|`makeAlias`
+|bool
+|Optional. When set to `true`, creates Pulumi resource aliases for existing VMs. This is useful when refactoring existing projects to use this component, allowing Pulumi to recognize existing resources instead of trying to recreate them. Defaults to `false` if not specified.
+|===
+
+=== Required Configuration Objects
+
+==== `vms` - Virtual Machines Configuration
+
+Array of VM specifications:
+
+[source,yaml]
+----
+vms:
+  - name: "k8s-master-01"
+    hostName: "k8s-master-01"
+    ipv4address: "192.168.24.32"
+    numCpus: 4
+    memory: 8192
+  - name: "k8s-worker-01"
+    hostName: "k8s-worker-01"
+    ipv4address: "192.168.24.33"
+    numCpus: 2
+    memory: 4096
+----
+
+.VM Configuration Fields
+[cols="1,1,3"]
+|===
+|Field |Type |Description
+
+|`name`
+|string
+|Name of the virtual machine in Proxmox
+
+|`hostName`
+|string
+|Hostname to be set via cloud-init
+
+|`ipv4address`
+|string
+|Static IPv4 address for the VM
+
+|`numCpus`
+|int
+|Number of CPU cores
+
+|`memory`
+|int
+|Memory size in MB
+|===
+
+==== `proxmoxCfg` - Proxmox Environment Configuration
+
+[source,yaml]
+----
+proxmoxCfg:
+  nodeName: pve1
+  datastoreId: local-lvm
+  templateVmId: 9000
+  diskSize: 50
+  tags:
+    - Production
+    - Kubernetes
+  onBoot: true
+  agent: true
+----
+
+.Proxmox Configuration Fields
+[cols="1,1,3"]
+|===
+|Field |Type |Description
+
+|`nodeName`
+|string
+|Proxmox node name where VMs will be created
+
+|`datastoreId`
+|string
+|Storage ID for VM disks (e.g., "local-lvm")
+
+|`templateVmId`
+|int
+|VM ID of the template to clone from
+
+|`diskSize`
+|int
+|Disk size in GB for each VM
+
+|`tags`
+|[]string
+|Tags for VM grouping (replaces vSphere folders)
+
+|`onBoot`
+|bool
+|Start VM automatically on host boot
+
+|`agent`
+|bool
+|Enable QEMU guest agent
+|===
+
+==== `networkCfg` - Network Configuration
+
+[source,yaml]
+----
+networkCfg:
+  gateway: 192.168.24.1
+  dnsServers:
+    - 192.168.24.5
+  domain: example.com
+  mask: 23
+  bridge: vmbr0
+----
+
+.Network Configuration Fields
+[cols="1,1,3"]
+|===
+|Field |Type |Description
+
+|`gateway`
+|string
+|Network gateway IP address
+
+|`dnsServers`
+|[]string
+|List of DNS server IP addresses
+
+|`domain`
+|string
+|Network domain name
+
+|`mask`
+|int
+|Subnet mask in CIDR notation (e.g., 24 for /24)
+
+|`bridge`
+|string
+|Proxmox network bridge (default: "vmbr0")
+
+|`model`
+|string
+|NIC model (default: "virtio")
+
+|`vlanTag`
+|int
+|Optional VLAN tag
+|===
+
+== Migrating from vSphere
+
+This component is designed as a drop-in replacement for `pulumi-vsphere-vms`. Key differences:
+
+* **Folders -> Tags**: Replace `vmsFolder` with `tags` array
+* **Template by name -> Template by VM ID**: Replace `templateName`/`templateFolder` with `templateVmId`
+* **Guest customization -> Cloud-init**: Network configuration is applied via cloud-init instead of vSphere guest customization
+* **Cluster -> Node**: Replace `cluster` with `nodeName` (explicit node placement)
+* **Config key**: Replace `vsphereCfg` with `proxmoxCfg` in your Pulumi YAML files
+
+== Example Project
+
+See the link:example/[example directory] for a complete working example that demonstrates:
+
+* link:example/main.go[Main Go application]
+* link:example/Pulumi.yaml[Root Pulumi configuration]
+* link:example/Pulumi.example.yaml[Stack-specific configuration]
+* link:example/go.mod[Go module setup]
+
+== Prerequisites
+
+* Proxmox VE environment with API access
+* Linux VM template with cloud-init configured
+* Pulumi CLI installed and configured
+* Go 1.24 or later
+
+== Template Requirements
+
+Your Linux template should be configured with:
+
+* Cloud-init package installed and enabled
+* QEMU guest agent installed (if using `agent: true`)
+* Network configuration set to use cloud-init
+* A unique VM ID that will be referenced in `templateVmId`
+
+== License
+
+This project is licensed under the Apache License Version 2.0 - see the link:LICENSE[LICENSE] file for details.

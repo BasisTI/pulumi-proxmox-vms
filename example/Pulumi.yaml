@@ -1,0 +1,28 @@
+name: pulumi-proxmox-vms-example
+runtime: go
+description: Example usage of the pulumi-proxmox-vms component
+
+config:
+  proxmoxve:endpoint:
+    value: 'https://proxmox.example.com:8006'
+  proxmoxve:username:
+    value: 'root@pam'
+  proxmoxCfg:
+    value:
+      nodeName: pve1
+      datastoreId: local-lvm
+      templateVmId: 9000
+      diskSize: 50
+      tags:
+        - Production
+        - Kubernetes
+      onBoot: true
+      agent: true
+  networkCfg:
+    value:
+      gateway: 192.168.24.1
+      dnsServers:
+        - 192.168.24.5
+      domain: example.com
+      mask: 23
+      bridge: vmbr0
