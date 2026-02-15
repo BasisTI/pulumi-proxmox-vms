@@ -172,6 +172,13 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		},
 	}
 
+	// Explicitly disable CDROM to prevent the provider from adding a default
+	// ide3 device with host_cdrom driver (which fails with empty filename).
+	vmArgs.Cdrom = &vm.VirtualMachineCdromArgs{
+		Enabled: pulumi.Bool(false),
+		FileId:  pulumi.String("none"),
+	}
+
 	if proxmoxCfg.Agent {
 		vmArgs.Agent = &vm.VirtualMachineAgentArgs{
 			Enabled: pulumi.Bool(true),
