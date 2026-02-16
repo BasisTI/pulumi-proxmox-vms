@@ -1,4 +1,4 @@
-module github.com/BasisTI/pulumi-proxmox-vms
+module github.com/BasisTI/pulumi-proxmox-vms/v2
 
 go 1.25.0
 
