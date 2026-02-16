@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/muhlba91/pulumi-proxmoxve/sdk/v6/go/proxmoxve/vm"
+	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
 )
@@ -150,6 +150,8 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 				DatastoreId: pulumi.String(proxmoxCfg.DatastoreId),
 				Size:        pulumi.Int(proxmoxCfg.DiskSize),
 				Interface:   pulumi.String("scsi0"),
+				Iothread:    pulumi.Bool(true),
+				Replicate:   pulumi.Bool(false),
 			},
 		},
 		NetworkDevices: vm.VirtualMachineNetworkDeviceArray{
@@ -172,11 +174,10 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		},
 	}
 
-	// Explicitly disable CDROM to prevent the provider from adding a default
+	// Explicitly set CDROM to "none" to prevent the provider from adding a default
 	// ide3 device with host_cdrom driver (which fails with empty filename).
 	vmArgs.Cdrom = &vm.VirtualMachineCdromArgs{
-		Enabled: pulumi.Bool(false),
-		FileId:  pulumi.String("none"),
+		FileId: pulumi.String("none"),
 	}
 
 	if proxmoxCfg.Agent {
