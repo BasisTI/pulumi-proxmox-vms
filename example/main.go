@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/BasisTI/pulumi-proxmox-vms/proxmox-vms"
+	"github.com/BasisTI/pulumi-proxmox-vms/v2/proxmox-vms"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 )
 
