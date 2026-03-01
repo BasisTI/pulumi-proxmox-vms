@@ -24,6 +24,7 @@ type ProxmoxCfg struct {
 	NodeName     string   `yaml:"nodeName"`     // Proxmox node name (e.g., "pve1").
 	DatastoreId  string   `yaml:"datastoreId"`  // Storage for VM disks (e.g., "local-lvm").
 	TemplateVmId int      `yaml:"templateVmId"` // VM ID of the template to clone.
+	LinkedClone  bool     `yaml:"linkedClone"`  // Use linked clone instead of full clone.
 	DiskSize     int      `yaml:"diskSize"`     // Disk size in GB.
 	Tags         []string `yaml:"tags"`         // Tags for VM grouping (replaces vSphere folders).
 	OnBoot       bool     `yaml:"onBoot"`       // Start VM on boot.
@@ -136,7 +137,7 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		Tags:     toStringArray(tags),
 		Clone: &vm.VirtualMachineCloneArgs{
 			VmId: pulumi.Int(proxmoxCfg.TemplateVmId),
-			Full: pulumi.Bool(true),
+			Full: pulumi.Bool(!proxmoxCfg.LinkedClone),
 		},
 		Cpu: &vm.VirtualMachineCpuArgs{
 			Cores:   pulumi.Int(vmData.NumCpus),
