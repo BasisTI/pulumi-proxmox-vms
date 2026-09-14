@@ -5,8 +5,11 @@ config:
       ipv4address: 192.168.24.32
       numcpus: 4
       memory: 4096
+      role: master
     - name: producao-k8s-master-genebra
       hostname: genebra
       ipv4address: 192.168.24.33
       numcpus: 4
       memory: 4096
+      role: master
+      cpuType: x86-64-v3

@@ -13,10 +13,12 @@ import (
 // Each field is tagged with `yaml` annotations for easy deserialization from configuration files.
 type VmData struct {
 	Name        string `yaml:"name"`        // Name of the virtual machine.
-	HostName    string `yaml:"hostName"`     // Hostname of the virtual machine.
-	Ipv4Address string `yaml:"ipv4address"`  // IPv4 address of the virtual machine.
-	NumCpus     int    `yaml:"numCpus"`      // Number of CPUs for the virtual machine.
-	Memory      int    `yaml:"memory"`       // Memory size in MB for the virtual machine.
+	HostName    string `yaml:"hostName"`    // Hostname of the virtual machine.
+	Ipv4Address string `yaml:"ipv4address"` // IPv4 address of the virtual machine.
+	NumCpus     int    `yaml:"numCpus"`     // Number of CPUs for the virtual machine.
+	Memory      int    `yaml:"memory"`      // Memory size in MB for the virtual machine.
+	Role        string `yaml:"role"`        // Optional role of the VM (e.g., "master", "worker"); added as a tag.
+	CpuType     string `yaml:"cpuType"`     // Optional CPU type for this VM; overrides ProxmoxCfg.CpuType.
 }
 
 // ProxmoxCfg defines the Proxmox-specific configuration required for creating virtual machines.
@@ -29,6 +31,7 @@ type ProxmoxCfg struct {
 	Tags         []string `yaml:"tags"`         // Tags for VM grouping (replaces vSphere folders).
 	OnBoot       bool     `yaml:"onBoot"`       // Start VM on boot.
 	Agent        bool     `yaml:"agent"`        // Enable QEMU guest agent.
+	CpuType      string   `yaml:"cpuType"`      // Optional default CPU type (e.g., "x86-64-v3"); empty keeps the provider default.
 }
 
 // NetworkCfg defines the network configuration for the virtual machines.
@@ -125,24 +128,16 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg, vmData VmData, opts ...pulumi.ResourceOption) (*vm.VirtualMachine, error) {
 	ipAddress := fmt.Sprintf("%s/%d", vmData.Ipv4Address, networkCfg.Mask)
 
-	// Sort tags for consistent ordering
-	tags := make([]string, len(proxmoxCfg.Tags))
-	copy(tags, proxmoxCfg.Tags)
-	sort.Strings(tags)
-
 	vmArgs := &vm.VirtualMachineArgs{
 		Name:     pulumi.String(vmData.Name),
 		NodeName: pulumi.String(proxmoxCfg.NodeName),
 		OnBoot:   pulumi.Bool(proxmoxCfg.OnBoot),
-		Tags:     toStringArray(tags),
+		Tags:     toStringArray(buildTags(proxmoxCfg, vmData)),
 		Clone: &vm.VirtualMachineCloneArgs{
 			VmId: pulumi.Int(proxmoxCfg.TemplateVmId),
 			Full: pulumi.Bool(!proxmoxCfg.LinkedClone),
 		},
-		Cpu: &vm.VirtualMachineCpuArgs{
-			Cores:   pulumi.Int(vmData.NumCpus),
-			Sockets: pulumi.Int(1),
-		},
+		Cpu: cpuArgs(proxmoxCfg, vmData),
 		Memory: &vm.VirtualMachineMemoryArgs{
 			Dedicated: pulumi.Int(vmData.Memory),
 		},
@@ -194,6 +189,39 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 	return newVm, nil
 }
 
+// buildTags returns the VM tags: the shared ProxmoxCfg.Tags plus the VM role, when set,
+// sorted so the order never produces a spurious diff.
+func buildTags(proxmoxCfg ProxmoxCfg, vmData VmData) []string {
+	tags := make([]string, 0, len(proxmoxCfg.Tags)+1)
+	tags = append(tags, proxmoxCfg.Tags...)
+	if vmData.Role != "" {
+		tags = append(tags, vmData.Role)
+	}
+	sort.Strings(tags)
+	return tags
+}
+
+// resolveCpuType picks the CPU type for a VM: the VM value wins over the shared default.
+// An empty result means the type is not sent and the provider default applies.
+func resolveCpuType(proxmoxCfg ProxmoxCfg, vmData VmData) string {
+	if vmData.CpuType != "" {
+		return vmData.CpuType
+	}
+	return proxmoxCfg.CpuType
+}
+
+// cpuArgs builds the CPU block of the VM from the resolved core count and type.
+func cpuArgs(proxmoxCfg ProxmoxCfg, vmData VmData) *vm.VirtualMachineCpuArgs {
+	args := &vm.VirtualMachineCpuArgs{
+		Cores:   pulumi.Int(vmData.NumCpus),
+		Sockets: pulumi.Int(1),
+	}
+	if cpuType := resolveCpuType(proxmoxCfg, vmData); cpuType != "" {
+		args.Type = pulumi.String(cpuType)
+	}
+	return args
+}
+
 // getNetworkDevice creates a network device configuration.
 func getNetworkDevice(networkCfg NetworkCfg) *vm.VirtualMachineNetworkDeviceArgs {
 	model := networkCfg.Model
@@ -225,4 +253,3 @@ func toStringArray(list []string) pulumi.StringArray {
 	}
 	return result
 }
-

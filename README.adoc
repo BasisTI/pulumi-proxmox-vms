@@ -6,7 +6,8 @@ This repository contains a Pulumi component for quickly creating and managing Pr
 
 * Create multiple VMs by cloning a Proxmox template
 * Automatic network configuration with static IP addresses via cloud-init
-* Configurable CPU, memory, and disk settings per VM
+* Configurable CPU cores, CPU type, memory, and disk settings per VM
+* Optional per-VM `role` (e.g. `master`, `worker`) recorded as a Proxmox tag
 * Tag-based VM grouping (replaces vSphere folder structure)
 * QEMU guest agent support
 * HA migration drift protection via `IgnoreChanges` on `nodeName`
@@ -104,11 +105,14 @@ vms:
     ipv4address: "192.168.24.32"
     numCpus: 4
     memory: 8192
+    role: master
   - name: "k8s-worker-01"
     hostName: "k8s-worker-01"
     ipv4address: "192.168.24.33"
     numCpus: 2
     memory: 4096
+    role: worker
+    cpuType: x86-64-v3
 ----
 
 .VM Configuration Fields
@@ -135,6 +139,14 @@ vms:
 |`memory`
 |int
 |Memory size in MB
+
+|`role`
+|string
+|Optional. Role of the VM in its group (e.g. `master`, `worker`). Added to the VM tags in Proxmox, next to `proxmoxCfg.tags`, so the role is visible in the UI and queryable by the API. Empty means no extra tag.
+
+|`cpuType`
+|string
+|Optional. CPU type for this VM (e.g. `x86-64-v3`, `host`). Overrides `proxmoxCfg.cpuType`. Changing the type of a running VM takes effect on its next restart.
 |===
 
 ==== `proxmoxCfg` - Proxmox Environment Configuration
@@ -151,6 +163,7 @@ proxmoxCfg:
     - Kubernetes
   onBoot: true
   agent: true
+  cpuType: x86-64-v3
 ----
 
 .Proxmox Configuration Fields
@@ -185,6 +198,10 @@ proxmoxCfg:
 |`agent`
 |bool
 |Enable QEMU guest agent
+
+|`cpuType`
+|string
+|Optional. Default CPU type for every VM (e.g. `x86-64-v3`). A VM can override it with its own `cpuType`. When neither is set the type is not sent and the provider default (`qemu64`) applies, which keeps existing stacks unchanged.
 |===
 
 ==== `networkCfg` - Network Configuration

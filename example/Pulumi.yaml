@@ -18,6 +18,7 @@ config:
         - Kubernetes
       onBoot: true
       agent: true
+      cpuType: x86-64-v2-AES
   networkCfg:
     value:
       gateway: 192.168.24.1
