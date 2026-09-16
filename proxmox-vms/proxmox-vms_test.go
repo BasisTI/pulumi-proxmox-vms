@@ -58,3 +58,11 @@ func TestCpuArgsOmitsTypeWhenUnset(t *testing.T) {
 		t.Fatalf("cpuArgs() must leave Type nil when no type is configured, got %v", args.Type)
 	}
 }
+
+func TestRebootAfterUpdateDefaultsToFalse(t *testing.T) {
+	var cfg ProxmoxCfg
+
+	if cfg.RebootAfterUpdate {
+		t.Fatal("RebootAfterUpdate must default to false so pulumi up never reboots running VMs")
+	}
+}

@@ -164,6 +164,7 @@ proxmoxCfg:
   onBoot: true
   agent: true
   cpuType: x86-64-v3
+  rebootAfterUpdate: false
 ----
 
 .Proxmox Configuration Fields
@@ -202,6 +203,10 @@ proxmoxCfg:
 |`cpuType`
 |string
 |Optional. Default CPU type for every VM (e.g. `x86-64-v3`). A VM can override it with its own `cpuType`. When neither is set the type is not sent and the provider default (`qemu64`) applies, which keeps existing stacks unchanged.
+
+|`rebootAfterUpdate`
+|bool
+|Optional, defaults to `false`. When `true` the provider reboots a VM right after an update that needs one (CPU type, memory), and `pulumi up` updates the VMs in parallel, so a whole cluster can restart at once. Leave it `false` and restart the VMs one at a time; the pending change is applied on that restart. The component always sends the value, because the provider default is `true`.
 |===
 
 ==== `networkCfg` - Network Configuration

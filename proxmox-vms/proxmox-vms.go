@@ -32,6 +32,10 @@ type ProxmoxCfg struct {
 	OnBoot       bool     `yaml:"onBoot"`       // Start VM on boot.
 	Agent        bool     `yaml:"agent"`        // Enable QEMU guest agent.
 	CpuType      string   `yaml:"cpuType"`      // Optional default CPU type (e.g., "x86-64-v3"); empty keeps the provider default.
+	// RebootAfterUpdate lets the provider reboot a VM right after an update that needs one
+	// (CPU type, memory). Defaults to false so a `pulumi up` never restarts running VMs on
+	// its own; the change is applied on the next restart done by the operator.
+	RebootAfterUpdate bool `yaml:"rebootAfterUpdate"`
 }
 
 // NetworkCfg defines the network configuration for the virtual machines.
@@ -138,6 +142,8 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 			Full: pulumi.Bool(!proxmoxCfg.LinkedClone),
 		},
 		Cpu: cpuArgs(proxmoxCfg, vmData),
+		// Always sent: the provider default is true, which reboots every VM in parallel.
+		RebootAfterUpdate: pulumi.Bool(proxmoxCfg.RebootAfterUpdate),
 		Memory: &vm.VirtualMachineMemoryArgs{
 			Dedicated: pulumi.Int(vmData.Memory),
 		},
