@@ -113,3 +113,12 @@ func TestNodeForFallsBackToConfiguredNode(t *testing.T) {
 		t.Fatalf("nodeFor(new) = %q, want siliconvalley", got)
 	}
 }
+
+func TestSocketsDefaultToOne(t *testing.T) {
+	if got := socketsFor(VmData{NumCpus: 8}); got != 1 {
+		t.Fatalf("socketsFor(unset) = %d, want 1", got)
+	}
+	if got := socketsFor(VmData{NumCpus: 4, Sockets: 2}); got != 2 {
+		t.Fatalf("socketsFor(2) = %d, want 2", got)
+	}
+}

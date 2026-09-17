@@ -15,7 +15,8 @@ type VmData struct {
 	Name        string `yaml:"name"`        // Name of the virtual machine.
 	HostName    string `yaml:"hostName"`    // Hostname of the virtual machine.
 	Ipv4Address string `yaml:"ipv4address"` // IPv4 address of the virtual machine.
-	NumCpus     int    `yaml:"numCpus"`     // Number of CPUs for the virtual machine.
+	NumCpus     int    `yaml:"numCpus"`     // CPU cores per socket.
+	Sockets     int    `yaml:"sockets"`     // Optional number of CPU sockets; 0 means 1. vCPUs = numCpus * sockets.
 	Memory      int    `yaml:"memory"`      // Memory size in MB for the virtual machine.
 	Role        string `yaml:"role"`        // Optional role of the VM (e.g., "master", "worker"); added as a tag.
 	CpuType     string `yaml:"cpuType"`     // Optional CPU type for this VM; overrides ProxmoxCfg.CpuType.
@@ -281,11 +282,19 @@ func resolveCpuType(proxmoxCfg ProxmoxCfg, vmData VmData) string {
 	return proxmoxCfg.CpuType
 }
 
+// socketsFor returns the socket count of a VM, defaulting to 1 when not configured.
+func socketsFor(vmData VmData) int {
+	if vmData.Sockets > 0 {
+		return vmData.Sockets
+	}
+	return 1
+}
+
 // cpuArgs builds the CPU block of the VM from the resolved core count and type.
 func cpuArgs(proxmoxCfg ProxmoxCfg, vmData VmData) *vm.VirtualMachineCpuArgs {
 	args := &vm.VirtualMachineCpuArgs{
 		Cores:   pulumi.Int(vmData.NumCpus),
-		Sockets: pulumi.Int(1),
+		Sockets: pulumi.Int(socketsFor(vmData)),
 	}
 	if cpuType := resolveCpuType(proxmoxCfg, vmData); cpuType != "" {
 		args.Type = pulumi.String(cpuType)

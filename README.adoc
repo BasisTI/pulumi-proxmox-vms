@@ -134,7 +134,11 @@ vms:
 
 |`numCpus`
 |int
-|Number of CPU cores
+|CPU cores **per socket**. Total vCPUs = `numCpus` × `sockets`.
+
+|`sockets`
+|int
+|Optional, defaults to `1`. Number of CPU sockets. Use it to mirror a topology set by hand in Proxmox (e.g. `numCpus: 4`, `sockets: 2` for 8 vCPUs); a topology change is applied on the next restart of the VM.
 
 |`memory`
 |int
