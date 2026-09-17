@@ -174,7 +174,7 @@ proxmoxCfg:
 
 |`nodeName`
 |string
-|Proxmox node name where VMs will be created
+|Proxmox node where **new** VMs are created. Existing VMs are located by name on any node of the cluster at every run (see <<node-discovery>>), so a VM migrated in Proxmox keeps being managed without touching this value.
 
 |`datastoreId`
 |string
@@ -255,6 +255,34 @@ networkCfg:
 |int
 |Optional VLAN tag
 |===
+
+[[node-discovery]]
+== Node discovery and migrated VMs
+
+The Proxmox provider addresses a VM by `nodeName` + id and never looks the node up by itself:
+a VM migrated to another node makes every read fail with `error retrieving VM <id>: the
+requested resource does not exist`, and a `pulumi refresh` in that situation drops the VM from
+the state.
+
+Since v2.3.0 the component lists the VMs of the cluster (`getVirtualMachines`) on every run,
+matches each configured VM by name (templates are skipped, duplicate names are an error) and
+passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to create VMs that do not
+exist yet. The VM resources are created with `migrate: true`, so a node change is never
+planned as a replace.
+
+**State that still carries the old node.** Stacks created before v2.3.0, or a VM migrated
+after the last `pulumi up`, show `nodeName: <old> => <real>` in the preview. Do not apply and
+do not refresh: the provider would try to migrate from the old node and fail. Fix the state
+once, then the diff disappears:
+
+[source,bash]
+----
+pulumi stack export > state.json
+# set inputs.nodeName and outputs.nodeName of the affected VMs to the node shown by the preview
+pulumi stack import --file state-fixed.json
+pulumi refresh --target '<urn of each affected VM>'
+pulumi preview
+----
 
 == Migrating from vSphere
 

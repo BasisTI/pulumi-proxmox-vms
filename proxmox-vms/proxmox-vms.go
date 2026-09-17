@@ -23,7 +23,7 @@ type VmData struct {
 
 // ProxmoxCfg defines the Proxmox-specific configuration required for creating virtual machines.
 type ProxmoxCfg struct {
-	NodeName     string   `yaml:"nodeName"`     // Proxmox node name (e.g., "pve1").
+	NodeName     string   `yaml:"nodeName"`     // Proxmox node where NEW VMs are created; existing VMs are found by name on any node.
 	DatastoreId  string   `yaml:"datastoreId"`  // Storage for VM disks (e.g., "local-lvm").
 	TemplateVmId int      `yaml:"templateVmId"` // VM ID of the template to clone.
 	LinkedClone  bool     `yaml:"linkedClone"`  // Use linked clone instead of full clone.
@@ -94,11 +94,15 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 		return nil, err
 	}
 
+	nodes, err := resolveVmNodes(ctx, args.Vms)
+	if err != nil {
+		return nil, err
+	}
+
 	var virtualMachines []*vm.VirtualMachine
 	for _, vmData := range args.Vms {
 		var resOpts []pulumi.ResourceOption
 		resOpts = append(resOpts, pulumi.Parent(proxmoxVms))
-		resOpts = append(resOpts, pulumi.IgnoreChanges([]string{"nodeName"}))
 
 		oldURN := fmt.Sprintf("urn:pulumi:%s::%s::proxmoxve:vm/virtualMachine:VirtualMachine::%s",
 			ctx.Stack(), ctx.Project(), vmData.Name)
@@ -112,7 +116,13 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 			resOpts = append(resOpts, aliases)
 		}
 
-		newVm, err := createVm(ctx, args.ProxmoxCfg, args.NetworkCfg, vmData, resOpts...)
+		nodeName := nodeFor(nodes, vmData, args.ProxmoxCfg)
+		if nodeName != args.ProxmoxCfg.NodeName {
+			_ = ctx.Log.Info(fmt.Sprintf("VM %s lives on node %s (proxmoxCfg.nodeName is %s); using the real node",
+				vmData.Name, nodeName, args.ProxmoxCfg.NodeName), nil)
+		}
+
+		newVm, err := createVm(ctx, args.ProxmoxCfg, args.NetworkCfg, vmData, nodeName, resOpts...)
 		if err != nil {
 			return nil, err
 		}
@@ -129,14 +139,19 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 }
 
 // createVm creates a single virtual machine in Proxmox by cloning a template.
-func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg, vmData VmData, opts ...pulumi.ResourceOption) (*vm.VirtualMachine, error) {
+// nodeName is the node the VM lives on (or, for a new VM, the node to create it on).
+func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg, vmData VmData, nodeName string, opts ...pulumi.ResourceOption) (*vm.VirtualMachine, error) {
 	ipAddress := fmt.Sprintf("%s/%d", vmData.Ipv4Address, networkCfg.Mask)
 
 	vmArgs := &vm.VirtualMachineArgs{
 		Name:     pulumi.String(vmData.Name),
-		NodeName: pulumi.String(proxmoxCfg.NodeName),
-		OnBoot:   pulumi.Bool(proxmoxCfg.OnBoot),
-		Tags:     toStringArray(buildTags(proxmoxCfg, vmData)),
+		NodeName: pulumi.String(nodeName),
+		// A node change must never be a replace. With migrate=true the provider treats it as an
+		// in-place update; when the state still points at the old node the update fails loudly
+		// instead of destroying and re-creating the VM.
+		Migrate: pulumi.Bool(true),
+		OnBoot:  pulumi.Bool(proxmoxCfg.OnBoot),
+		Tags:    toStringArray(buildTags(proxmoxCfg, vmData)),
 		Clone: &vm.VirtualMachineCloneArgs{
 			VmId: pulumi.Int(proxmoxCfg.TemplateVmId),
 			Full: pulumi.Bool(!proxmoxCfg.LinkedClone),
@@ -193,6 +208,56 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		return nil, err
 	}
 	return newVm, nil
+}
+
+// resolveVmNodes asks Proxmox where each configured VM currently lives, so a VM migrated to
+// another node keeps being managed instead of failing with "the requested resource does not
+// exist". VMs not found (not created yet) are absent from the map.
+func resolveVmNodes(ctx *pulumi.Context, vms []VmData) (map[string]string, error) {
+	res, err := vm.GetVirtualMachines(ctx, &vm.GetVirtualMachinesArgs{})
+	if err != nil {
+		return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
+	}
+	return nodesByName(res.Vms, vms)
+}
+
+// nodesByName maps each wanted VM name to the node where Proxmox reports it. Templates are
+// skipped. A name present more than once is an error, because the node could not be chosen.
+func nodesByName(found []vm.GetVirtualMachinesVm, wanted []VmData) (map[string]string, error) {
+	byName := map[string][]vm.GetVirtualMachinesVm{}
+	for _, f := range found {
+		if f.Template != nil && *f.Template {
+			continue
+		}
+		byName[f.Name] = append(byName[f.Name], f)
+	}
+
+	nodes := make(map[string]string, len(wanted))
+	for _, w := range wanted {
+		matches := byName[w.Name]
+		switch len(matches) {
+		case 0:
+			// Not created yet: the caller falls back to ProxmoxCfg.NodeName.
+		case 1:
+			nodes[w.Name] = matches[0].NodeName
+		default:
+			ids := make([]string, 0, len(matches))
+			for _, m := range matches {
+				ids = append(ids, fmt.Sprintf("%d@%s", m.VmId, m.NodeName))
+			}
+			sort.Strings(ids)
+			return nil, fmt.Errorf("VM name %q is not unique in the Proxmox cluster (%v); rename the extra VMs", w.Name, ids)
+		}
+	}
+	return nodes, nil
+}
+
+// nodeFor returns the node to use for a VM: where it lives if it exists, else the configured node.
+func nodeFor(nodes map[string]string, vmData VmData, proxmoxCfg ProxmoxCfg) string {
+	if n := nodes[vmData.Name]; n != "" {
+		return n
+	}
+	return proxmoxCfg.NodeName
 }
 
 // buildTags returns the VM tags: the shared ProxmoxCfg.Tags plus the VM role, when set,

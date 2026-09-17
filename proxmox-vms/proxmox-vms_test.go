@@ -2,7 +2,10 @@ package proxmox_vms
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 )
 
 func TestBuildTagsAddsRoleAndSorts(t *testing.T) {
@@ -64,5 +67,49 @@ func TestRebootAfterUpdateDefaultsToFalse(t *testing.T) {
 
 	if cfg.RebootAfterUpdate {
 		t.Fatal("RebootAfterUpdate must default to false so pulumi up never reboots running VMs")
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestNodesByNameUsesTheNodeReportedByProxmox(t *testing.T) {
+	found := []vm.GetVirtualMachinesVm{
+		{Name: "chur", NodeName: "mountainview", VmId: 117},
+		{Name: "thun", NodeName: "siliconvalley", VmId: 116},
+		{Name: "chur", NodeName: "siliconvalley", VmId: 102, Template: boolPtr(true)},
+	}
+	wanted := []VmData{{Name: "chur"}, {Name: "thun"}, {Name: "nova"}}
+
+	got, err := nodesByName(found, wanted)
+	if err != nil {
+		t.Fatalf("nodesByName() error = %v", err)
+	}
+	want := map[string]string{"chur": "mountainview", "thun": "siliconvalley"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nodesByName() = %v, want %v", got, want)
+	}
+}
+
+func TestNodesByNameRejectsDuplicateNames(t *testing.T) {
+	found := []vm.GetVirtualMachinesVm{
+		{Name: "chur", NodeName: "mountainview", VmId: 117},
+		{Name: "chur", NodeName: "redwood", VmId: 140},
+	}
+
+	_, err := nodesByName(found, []VmData{{Name: "chur"}})
+	if err == nil || !strings.Contains(err.Error(), "117@mountainview") || !strings.Contains(err.Error(), "140@redwood") {
+		t.Fatalf("nodesByName() must name both duplicates, got %v", err)
+	}
+}
+
+func TestNodeForFallsBackToConfiguredNode(t *testing.T) {
+	cfg := ProxmoxCfg{NodeName: "siliconvalley"}
+	nodes := map[string]string{"chur": "mountainview"}
+
+	if got := nodeFor(nodes, VmData{Name: "chur"}, cfg); got != "mountainview" {
+		t.Fatalf("nodeFor(existing) = %q, want mountainview", got)
+	}
+	if got := nodeFor(nodes, VmData{Name: "nova"}, cfg); got != "siliconvalley" {
+		t.Fatalf("nodeFor(new) = %q, want siliconvalley", got)
 	}
 }
