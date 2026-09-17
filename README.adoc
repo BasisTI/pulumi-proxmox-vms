@@ -259,30 +259,28 @@ networkCfg:
 [[node-discovery]]
 == Node discovery and migrated VMs
 
-The Proxmox provider addresses a VM by `nodeName` + id and never looks the node up by itself:
-a VM migrated to another node makes every read fail with `error retrieving VM <id>: the
-requested resource does not exist`, and a `pulumi refresh` in that situation drops the VM from
-the state.
+The provider addresses a VM by `nodeName` + id. Its **read** path (`pulumi refresh`) looks the
+VM up by id in `GET /cluster/resources` and rewrites `nodeName` in the state, so a VM migrated
+in Proxmox is found again. Its **update** path does not: it uses the node stored in the state,
+and a VM migrated after the last refresh makes `pulumi up` fail with
+`error retrieving VM <id>: the requested resource does not exist`.
 
-Since v2.3.0 the component lists the VMs of the cluster (`getVirtualMachines`) on every run,
-matches each configured VM by name (templates are skipped, duplicate names are an error) and
-passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to create VMs that do not
-exist yet. The VM resources are created with `migrate: true`, so a node change is never
-planned as a replace.
+Since v2.3.0 the component also lists the VMs of the cluster (`getVirtualMachines`) on every
+run, matches each configured VM by name (templates are skipped, duplicate names are an error)
+and passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to create VMs that do
+not exist yet. The VM resources are created with `migrate: true`, so a node change is never
+planned as a replace: when the state is stale the update fails instead of re-creating the VM.
 
-**State that still carries the old node.** Stacks created before v2.3.0, or a VM migrated
-after the last `pulumi up`, show `nodeName: <old> => <real>` in the preview. Do not apply and
-do not refresh: the provider would try to migrate from the old node and fail. Fix the state
-once, then the diff disappears:
+**After a VM is migrated in Proxmox**, refresh before applying:
 
 [source,bash]
 ----
-pulumi stack export > state.json
-# set inputs.nodeName and outputs.nodeName of the affected VMs to the node shown by the preview
-pulumi stack import --file state-fixed.json
-pulumi refresh --target '<urn of each affected VM>'
-pulumi preview
+pulumi refresh          # or: pulumi up --refresh
+pulumi preview          # no nodeName diff expected any more
 ----
+
+A preview showing `nodeName: <old> => <real>` means the state was not refreshed since the
+migration. Refresh; do not apply.
 
 == Migrating from vSphere
 
