@@ -300,7 +300,13 @@ The component never sets disk speed limits, so the VM resources are created with
 `ignoreChanges: ["disks[0].speed"]`. The path names the concrete index on purpose: the bridge
 matches ignore paths literally against the provider diff, and `disks[*].speed` hides nothing
 (`muhlba91/pulumi-proxmoxve#514`). Every other disk field (size, datastore, interface, …) is
-still managed and shows up in the preview. A limit set by hand in Proxmox is left alone.
+still managed and shows up in the preview.
+
+A limit set by hand in Proxmox is not reverted by a plain `pulumi up`, but **refresh after
+changing it** (`pulumi refresh`, or `pulumi up --refresh`). An ignored attribute keeps the
+value stored in the state, and the provider sends the whole disk on update: without a refresh,
+a later change to another disk field (e.g. `size`) writes the old `speed` from the state back
+to Proxmox.
 
 == Migrating from vSphere
 
