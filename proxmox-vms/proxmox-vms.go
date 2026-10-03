@@ -144,6 +144,16 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg, vmData VmData, nodeName string, opts ...pulumi.ResourceOption) (*vm.VirtualMachine, error) {
 	ipAddress := fmt.Sprintf("%s/%d", vmData.Ipv4Address, networkCfg.Mask)
 
+	disks := vm.VirtualMachineDiskArray{
+		&vm.VirtualMachineDiskArgs{
+			DatastoreId: pulumi.String(proxmoxCfg.DatastoreId),
+			Size:        pulumi.Int(proxmoxCfg.DiskSize),
+			Interface:   pulumi.String("scsi0"),
+			Iothread:    pulumi.Bool(true),
+			Replicate:   pulumi.Bool(false),
+		},
+	}
+
 	vmArgs := &vm.VirtualMachineArgs{
 		Name:     pulumi.String(vmData.Name),
 		NodeName: pulumi.String(nodeName),
@@ -163,15 +173,7 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		Memory: &vm.VirtualMachineMemoryArgs{
 			Dedicated: pulumi.Int(vmData.Memory),
 		},
-		Disks: vm.VirtualMachineDiskArray{
-			&vm.VirtualMachineDiskArgs{
-				DatastoreId: pulumi.String(proxmoxCfg.DatastoreId),
-				Size:        pulumi.Int(proxmoxCfg.DiskSize),
-				Interface:   pulumi.String("scsi0"),
-				Iothread:    pulumi.Bool(true),
-				Replicate:   pulumi.Bool(false),
-			},
-		},
+		Disks: disks,
 		NetworkDevices: vm.VirtualMachineNetworkDeviceArray{
 			getNetworkDevice(networkCfg),
 		},
@@ -204,11 +206,29 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		}
 	}
 
+	opts = append(opts, pulumi.IgnoreChanges(diskSpeedPaths(len(disks))))
+
 	newVm, err := vm.NewVirtualMachine(ctx, vmData.Name, vmArgs, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return newVm, nil
+}
+
+// diskSpeedPaths returns the ignoreChanges paths for the speed block of each disk.
+//
+// The provider gives disks[n].speed a default of one block with every limit at 0, while its
+// Read stores an empty list when Proxmox reports no limits. Config and state never match, so
+// every preview proposes adding the zeroed block, and the update does not stick. Declaring the
+// zeros does not help either. The component never sets speed limits, so the block is ignored.
+// The index must be concrete: the bridge matches these paths literally against the provider
+// diff, and "disks[*].speed" would hide nothing.
+func diskSpeedPaths(diskCount int) []string {
+	paths := make([]string, 0, diskCount)
+	for i := 0; i < diskCount; i++ {
+		paths = append(paths, fmt.Sprintf("disks[%d].speed", i))
+	}
+	return paths
 }
 
 // resolveVmNodes asks Proxmox where each configured VM currently lives, so a VM migrated to
