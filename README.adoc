@@ -286,6 +286,22 @@ pulumi preview          # no nodeName diff expected any more
 A preview showing `nodeName: <old> => <real>` means the state was not refreshed since the
 migration. Refresh; do not apply.
 
+[[disk-speed]]
+== Disk speed limits are not managed
+
+Up to v2.4.0 every preview proposed an `update` on every VM only to add `disks[0].speed` with
+the eight limits (`iopsRead`, `read`, `write`, …) at `0`, and the diff came back after `up`.
+The provider (bpg `terraform-provider-proxmox`, bridged by `pulumi-proxmoxve`) gives `speed` a
+default of one block with every limit at `0`, while its read path stores an empty list when
+Proxmox reports no limits; config and state never match. Declaring the zeros explicitly does
+not help (upstream: `muhlba91/pulumi-proxmoxve#664`, `bpg/terraform-provider-proxmox#1539`).
+
+The component never sets disk speed limits, so the VM resources are created with
+`ignoreChanges: ["disks[0].speed"]`. The path names the concrete index on purpose: the bridge
+matches ignore paths literally against the provider diff, and `disks[*].speed` hides nothing
+(`muhlba91/pulumi-proxmoxve#514`). Every other disk field (size, datastore, interface, …) is
+still managed and shows up in the preview. A limit set by hand in Proxmox is left alone.
+
 == Migrating from vSphere
 
 This component is designed as a drop-in replacement for `pulumi-vsphere-vms`. Key differences:
