@@ -62,7 +62,7 @@ func registerVms(t *testing.T, vms []VmData) map[string]registeredVm {
 	return mocks.vms
 }
 
-func TestVmIgnoresOnlyTheDiskSpeedBlock(t *testing.T) {
+func TestVmIgnoresOnlyTheDiskSpeedBlockAndClone(t *testing.T) {
 	vms := registerVms(t, []VmData{
 		{Name: "chur", Ipv4Address: "192.168.24.103", NumCpus: 4, Memory: 16384},
 		{Name: "thun", Ipv4Address: "192.168.24.104", NumCpus: 4, Memory: 16384},
@@ -75,8 +75,13 @@ func TestVmIgnoresOnlyTheDiskSpeedBlock(t *testing.T) {
 		}
 		// The concrete index is required: the bridge matches ignoreChanges paths literally
 		// when filtering the provider diff, so "disks[*].speed" would hide nothing.
-		if want := []string{"disks[0].speed"}; !reflect.DeepEqual(got.ignoreChanges, want) {
+		// "clone" keeps a new templateVmId from replacing existing VMs; new VMs still send it.
+		if want := []string{"disks[0].speed", "clone"}; !reflect.DeepEqual(got.ignoreChanges, want) {
 			t.Fatalf("VM %s ignoreChanges = %v, want %v", name, got.ignoreChanges, want)
+		}
+		clone := got.inputs["clone"].ObjectValue()
+		if id := clone["vmId"].NumberValue(); id != 9000 {
+			t.Fatalf("VM %s clone.vmId = %v, want 9000: a new VM must still clone the template", name, id)
 		}
 	}
 }
