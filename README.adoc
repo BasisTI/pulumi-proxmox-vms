@@ -11,6 +11,7 @@ This repository contains a Pulumi component for quickly creating and managing Pr
 * Tag-based VM grouping (replaces vSphere folder structure)
 * QEMU guest agent support
 * HA migration drift protection via `IgnoreChanges` on `nodeName`
+* Changing `templateVmId` does not replace existing VMs (see <<template-change>>)
 * Easy configuration through Pulumi YAML files
 
 == Installation
@@ -307,6 +308,21 @@ changing it** (`pulumi refresh`, or `pulumi up --refresh`). An ignored attribute
 value stored in the state, and the provider sends the whole disk on update: without a refresh,
 a later change to another disk field (e.g. `size`) writes the old `speed` from the state back
 to Proxmox.
+
+[[template-change]]
+== Changing `templateVmId` does not replace existing VMs
+
+The VM resources are created with `ignoreChanges: ["clone"]` next to the disk speed path. In the
+provider (`pulumi-proxmoxve` v7.13.0, bpg `terraform-provider-proxmox` v0.95.0) `clone.vm_id` is
+`ForceNew`, but the read path never writes `clone` back from the Proxmox API, so without the
+ignore a new template id would replace every VM of the stack.
+
+With it, a preview after changing `templateVmId` shows no change for the existing VMs, and only
+VMs created afterwards use the new template. This is how a monthly rebuilt template (see
+`basis/iac/vm_templates`) is adopted by new VMs only. Existing VMs are full clones
+(`linkedClone: false`), so deleting the old template from Proxmox causes no drift. The same
+property applies to `linkedClone` and the other `clone` fields: after creation they are not
+managed.
 
 == Migrating from vSphere
 

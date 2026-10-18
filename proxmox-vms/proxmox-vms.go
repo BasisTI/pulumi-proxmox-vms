@@ -206,7 +206,7 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		}
 	}
 
-	opts = append(opts, pulumi.IgnoreChanges(diskSpeedPaths(len(disks))))
+	opts = append(opts, pulumi.IgnoreChanges(append(diskSpeedPaths(len(disks)), clonePath)))
 
 	newVm, err := vm.NewVirtualMachine(ctx, vmData.Name, vmArgs, opts...)
 	if err != nil {
@@ -214,6 +214,16 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 	}
 	return newVm, nil
 }
+
+// clonePath is ignored so that changing templateVmId does not replace the existing VMs.
+//
+// The provider marks clone.vm_id ForceNew, but its Read never fills clone back from the API: the
+// clone block exists only in the configuration and the state. A new template id would therefore
+// replace every VM of the stack, although a VM never depends on its source template (full clone,
+// linkedClone: false). With the path ignored, the engine keeps the stored clone for VMs that
+// already exist, and only VMs created from now on use the new template. The template may even
+// be deleted from Proxmox afterwards.
+const clonePath = "clone"
 
 // diskSpeedPaths returns the ignoreChanges paths for the speed block of each disk.
 //
