@@ -20,6 +20,10 @@ type VmData struct {
 	Memory      int    `yaml:"memory"`      // Memory size in MB for the virtual machine.
 	Role        string `yaml:"role"`        // Optional role of the VM (e.g., "master", "worker"); added as a tag.
 	CpuType     string `yaml:"cpuType"`     // Optional CPU type for this VM; overrides ProxmoxCfg.CpuType.
+	// TemplateVmId is the optional template this VM is cloned from; 0 means ProxmoxCfg.TemplateVmId.
+	// Like the rest of the clone block it is ignored once the VM exists (see clonePath), so it only
+	// decides the template of a VM that is being created.
+	TemplateVmId int `yaml:"templateVmId"`
 }
 
 // ProxmoxCfg defines the Proxmox-specific configuration required for creating virtual machines.
@@ -164,7 +168,7 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 		OnBoot:  pulumi.Bool(proxmoxCfg.OnBoot),
 		Tags:    toStringArray(buildTags(proxmoxCfg, vmData)),
 		Clone: &vm.VirtualMachineCloneArgs{
-			VmId: pulumi.Int(proxmoxCfg.TemplateVmId),
+			VmId: pulumi.Int(templateVmIdFor(proxmoxCfg, vmData)),
 			Full: pulumi.Bool(!proxmoxCfg.LinkedClone),
 		},
 		Cpu: cpuArgs(proxmoxCfg, vmData),
@@ -215,7 +219,7 @@ func createVm(ctx *pulumi.Context, proxmoxCfg ProxmoxCfg, networkCfg NetworkCfg,
 	return newVm, nil
 }
 
-// clonePath is ignored so that changing templateVmId does not replace the existing VMs.
+// clonePath is ignored so that changing templateVmId (shared or per VM) does not replace the existing VMs.
 //
 // The provider marks clone.vm_id ForceNew, but its Read never fills clone back from the API: the
 // clone block exists only in the configuration and the state. A new template id would therefore
@@ -310,6 +314,14 @@ func resolveCpuType(proxmoxCfg ProxmoxCfg, vmData VmData) string {
 		return vmData.CpuType
 	}
 	return proxmoxCfg.CpuType
+}
+
+// templateVmIdFor returns the template to clone: the VM value wins over the shared default.
+func templateVmIdFor(proxmoxCfg ProxmoxCfg, vmData VmData) int {
+	if vmData.TemplateVmId > 0 {
+		return vmData.TemplateVmId
+	}
+	return proxmoxCfg.TemplateVmId
 }
 
 // socketsFor returns the socket count of a VM, defaulting to 1 when not configured.
