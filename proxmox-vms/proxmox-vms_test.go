@@ -122,3 +122,14 @@ func TestSocketsDefaultToOne(t *testing.T) {
 		t.Fatalf("socketsFor(2) = %d, want 2", got)
 	}
 }
+
+func TestTemplateVmIdOfVmWinsOverTheSharedDefault(t *testing.T) {
+	cfg := ProxmoxCfg{TemplateVmId: 140}
+
+	if got := templateVmIdFor(cfg, VmData{TemplateVmId: 150}); got != 150 {
+		t.Fatalf("templateVmIdFor(per-VM) = %d, want 150", got)
+	}
+	if got := templateVmIdFor(cfg, VmData{}); got != 140 {
+		t.Fatalf("templateVmIdFor(unset) = %d, want the shared default 140", got)
+	}
+}

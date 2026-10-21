@@ -149,6 +149,10 @@ vms:
 |string
 |Optional. Role of the VM in its group (e.g. `master`, `worker`). Added to the VM tags in Proxmox, next to `proxmoxCfg.tags`, so the role is visible in the UI and queryable by the API. Empty means no extra tag.
 
+|`templateVmId`
+|int
+|Optional. Template this VM is cloned from. Overrides `proxmoxCfg.templateVmId`; empty (or `0`) keeps the shared one. Like `proxmoxCfg.templateVmId` it only matters when the VM is created: the clone block is ignored afterwards, so setting or changing it never replaces an existing VM.
+
 |`cpuType`
 |string
 |Optional. CPU type for this VM (e.g. `x86-64-v3`, `host`). Overrides `proxmoxCfg.cpuType`. Changing the type of a running VM takes effect on its next restart.
