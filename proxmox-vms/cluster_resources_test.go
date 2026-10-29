@@ -80,10 +80,15 @@ func fakeLookup(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+// fakeConfig is a stack configuration: a key present in the map is set, even when empty.
+func fakeConfig(m map[string]string) func(string) (string, bool) {
+	return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+}
+
 func TestResolveClusterResourcesTokenFromEnvEndpointFromStack(t *testing.T) {
 	// The build-agent case: only proxmoxve:endpoint in the stack, token delivered by the iac-runner.
 	ep, ok, reason := resolveClusterResources(
-		fakeLookup(map[string]string{"endpoint": "https://pve:8006/"}),
+		fakeConfig(map[string]string{"endpoint": "https://pve:8006/"}),
 		fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "u@pve!t=s", "PROXMOX_VE_INSECURE": "true"}),
 	)
 	if !ok || reason != "" {
@@ -97,7 +102,7 @@ func TestResolveClusterResourcesTokenFromEnvEndpointFromStack(t *testing.T) {
 
 func TestResolveClusterResourcesStackWinsOverEnvironment(t *testing.T) {
 	ep, ok, _ := resolveClusterResources(
-		fakeLookup(map[string]string{"endpoint": "https://stack", "apiToken": "stack-token"}),
+		fakeConfig(map[string]string{"endpoint": "https://stack", "apiToken": "stack-token"}),
 		fakeLookup(map[string]string{"PROXMOX_VE_ENDPOINT": "https://env", "PROXMOX_VE_API_TOKEN": "env-token", "PM_VE_ENDPOINT": "https://alias"}),
 	)
 	if !ok || ep.URL != "https://stack" || ep.ApiToken != "stack-token" {
@@ -106,7 +111,7 @@ func TestResolveClusterResourcesStackWinsOverEnvironment(t *testing.T) {
 }
 
 func TestResolveClusterResourcesEndpointFromEnvironmentAndAlias(t *testing.T) {
-	ep, ok, _ := resolveClusterResources(fakeLookup(nil),
+	ep, ok, _ := resolveClusterResources(fakeConfig(nil),
 		fakeLookup(map[string]string{"PM_VE_ENDPOINT": "https://alias", "PROXMOX_VE_API_TOKEN": "t"}))
 	if !ok || ep.URL != "https://alias" || ep.Insecure {
 		t.Fatalf("ep = %+v, ok = %v", ep, ok)
@@ -116,13 +121,66 @@ func TestResolveClusterResourcesEndpointFromEnvironmentAndAlias(t *testing.T) {
 func TestResolveClusterResourcesWithoutTokenFallsBack(t *testing.T) {
 	// kubernetes and docker stacks: username/password, no token anywhere.
 	_, ok, reason := resolveClusterResources(
-		fakeLookup(map[string]string{"endpoint": "https://pve", "username": "root@pam"}),
+		fakeConfig(map[string]string{"endpoint": "https://pve", "username": "root@pam"}),
 		fakeLookup(map[string]string{"PROXMOX_VE_PASSWORD": "x"}))
 	if ok || !strings.Contains(reason, "API token") {
 		t.Fatalf("ok = %v, reason = %q", ok, reason)
 	}
-	_, ok, reason = resolveClusterResources(fakeLookup(nil), fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "t"}))
+	_, ok, reason = resolveClusterResources(fakeConfig(nil), fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "t"}))
 	if ok || !strings.Contains(reason, "endpoint") {
 		t.Fatalf("ok = %v, reason = %q", ok, reason)
+	}
+}
+
+func TestResolveClusterResourcesInsecureFalseInStackKeepsTrueEnvironment(t *testing.T) {
+	// d.GetOk skips the zero value: false in the stack does not override true in the environment.
+	ep, ok, _ := resolveClusterResources(
+		fakeConfig(map[string]string{"endpoint": "https://pve", "insecure": "false"}),
+		fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "t", "PROXMOX_VE_INSECURE": "true"}))
+	if !ok || !ep.Insecure {
+		t.Fatalf("ep = %+v, ok = %v, want insecure kept from the environment", ep, ok)
+	}
+}
+
+func TestResolveClusterResourcesInsecureEnvironmentOnlyTrueOrOne(t *testing.T) {
+	for env, want := range map[string]bool{"true": true, "1": true, "TRUE": false, "True": false, "t": false, "yes": false, "false": false} {
+		ep, _, _ := resolveClusterResources(
+			fakeConfig(map[string]string{"endpoint": "https://pve", "apiToken": "t"}),
+			fakeLookup(map[string]string{"PROXMOX_VE_INSECURE": env}))
+		if ep.Insecure != want {
+			t.Errorf("PROXMOX_VE_INSECURE=%q: insecure = %v, want %v", env, ep.Insecure, want)
+		}
+	}
+}
+
+func TestResolveClusterResourcesInsecureTrueInStack(t *testing.T) {
+	ep, _, _ := resolveClusterResources(
+		fakeConfig(map[string]string{"endpoint": "https://pve", "apiToken": "t", "insecure": "true"}), fakeLookup(nil))
+	if !ep.Insecure {
+		t.Fatal("insecure=true in the stack must be honored")
+	}
+}
+
+func TestResolveClusterResourcesEmptyTokenInStackOverridesEnvironment(t *testing.T) {
+	// d.GetOkExists: a token present in the stack wins even when empty, so the provider has no
+	// token and authenticates by username/password. The component must fall back too.
+	_, ok, reason := resolveClusterResources(
+		fakeConfig(map[string]string{"endpoint": "https://pve", "apiToken": ""}),
+		fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "env-token"}))
+	if ok || !strings.Contains(reason, "API token") {
+		t.Fatalf("ok = %v, reason = %q, want fallback", ok, reason)
+	}
+}
+
+func TestListClusterVmsAcceptsEveryEndpointForm(t *testing.T) {
+	for _, suffix := range []string{"", "/", "/api2/json", "/api2/json/"} {
+		srv, req := clusterServer(t, http.StatusOK, clusterResourcesBody)
+		_, err := listClusterVms(context.Background(), srv.Client(), clusterResourcesEndpoint{URL: srv.URL + suffix, ApiToken: "t"})
+		if err != nil {
+			t.Fatalf("endpoint suffix %q: %v", suffix, err)
+		}
+		if req.URL.Path != "/api2/json/cluster/resources" {
+			t.Fatalf("endpoint suffix %q: requested %s", suffix, req.URL.Path)
+		}
 	}
 }

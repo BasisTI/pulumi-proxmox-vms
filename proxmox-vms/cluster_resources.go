@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -35,20 +36,31 @@ type clusterResourcesEndpoint struct {
 // falls back to the provider data source. reason says what was missing.
 func clusterResourcesFromConfig(ctx *pulumi.Context) (ep clusterResourcesEndpoint, ok bool, reason string) {
 	return resolveClusterResources(
-		func(key string) string { return pconfig.Get(ctx, "proxmoxve:"+key) },
+		func(key string) (string, bool) {
+			v, err := pconfig.Try(ctx, "proxmoxve:"+key)
+			return v, err == nil
+		},
 		os.Getenv,
 	)
 }
 
-// resolveClusterResources mirrors bpg/terraform-provider-proxmox v0.118.1: each item starts from
-// the environment variable and the stack configuration overrides it when set
-// (proxmoxtf/provider/provider.go:53-69 and :83-85 for the SDK provider, which serves the VMs
-// data source; fwprovider/provider.go:386-404 for the framework provider). The PM_VE_* names
-// are aliases accepted by the SDK provider, after PROXMOX_VE_* (utils/env.go GetAnyStringEnv).
+// resolveClusterResources mirrors the SDK provider of bpg/terraform-provider-proxmox, the one
+// that serves the VMs data source. pulumi-proxmoxve v7.13.0 depends on bpg v0.95.0
+// (provider/go.mod:8); lines below are from that tag, and v0.118.1 has the same code.
+// Each item starts from the environment and the stack configuration overrides it
+// (proxmoxtf/provider/provider.go:53-61 environment, :63-69 and :83-85 configuration):
+//   - endpoint: PROXMOX_VE_ENDPOINT, then PM_VE_ENDPOINT (utils.GetAnyStringEnv, first
+//     non-empty); proxmoxve:endpoint wins when non-empty (d.GetOk).
+//   - apiToken: same for PROXMOX_VE_API_TOKEN / PM_VE_API_TOKEN, but the configuration uses
+//     d.GetOkExists, so a token present in the stack, even empty, wins over the environment.
+//     An empty token means no token: the provider then authenticates by username/password.
+//   - insecure: utils.GetAnyBoolEnv (utils/env.go:26-37) is true only for exactly "true" or
+//     "1" (not "TRUE", "t"); proxmoxve:insecure uses d.GetOk, which skips the zero value, so
+//     "false" in the stack does not turn off a true environment variable.
 //
 // A stack that carries only proxmoxve:endpoint, with the token in PROXMOX_VE_API_TOKEN, as the
 // iac-runner delivers it, resolves to the endpoint of the stack and the token of the environment.
-func resolveClusterResources(cfg func(key string) string, env func(name string) string) (ep clusterResourcesEndpoint, ok bool, reason string) {
+func resolveClusterResources(cfg func(key string) (string, bool), env func(name string) string) (ep clusterResourcesEndpoint, ok bool, reason string) {
 	anyEnv := func(names ...string) string {
 		for _, n := range names {
 			if v := env(n); v != "" {
@@ -57,17 +69,24 @@ func resolveClusterResources(cfg func(key string) string, env func(name string) 
 		}
 		return ""
 	}
-	pick := func(key string, names ...string) string {
-		if v := cfg(key); v != "" {
-			return v
-		}
-		return anyEnv(names...)
+
+	ep.URL = anyEnv("PROXMOX_VE_ENDPOINT", "PM_VE_ENDPOINT")
+	if v, _ := cfg("endpoint"); v != "" {
+		ep.URL = v
 	}
 
-	ep.URL = pick("endpoint", "PROXMOX_VE_ENDPOINT", "PM_VE_ENDPOINT")
-	ep.ApiToken = pick("apiToken", "PROXMOX_VE_API_TOKEN", "PM_VE_API_TOKEN")
-	insecure := pick("insecure", "PROXMOX_VE_INSECURE", "PM_VE_INSECURE")
-	ep.Insecure, _ = strconv.ParseBool(insecure)
+	ep.ApiToken = anyEnv("PROXMOX_VE_API_TOKEN", "PM_VE_API_TOKEN")
+	if v, present := cfg("apiToken"); present {
+		ep.ApiToken = v
+	}
+
+	envInsecure := anyEnv("PROXMOX_VE_INSECURE", "PM_VE_INSECURE")
+	ep.Insecure = envInsecure == "true" || envInsecure == "1"
+	if v, _ := cfg("insecure"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil && b {
+			ep.Insecure = true
+		}
+	}
 
 	switch {
 	case ep.URL == "":
@@ -76,6 +95,19 @@ func resolveClusterResources(cfg func(key string) string, env func(name string) 
 		return clusterResourcesEndpoint{}, false, "no API token (proxmoxve:apiToken or PROXMOX_VE_API_TOKEN); the provider authenticates by username/password or ticket"
 	}
 	return ep, true, ""
+}
+
+// apiBaseURL normalizes the endpoint like the provider client (proxmox/api/client.go:101-105
+// in v0.95.0): the path is dropped, so "https://pve:8006", ".../", ".../api2/json" and
+// ".../api2/json/" all address the same API.
+func apiBaseURL(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid Proxmox endpoint: %w", err)
+	}
+	u.Path = ""
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 // clusterResource is one entry of GET /cluster/resources?type=vm.
@@ -97,8 +129,11 @@ func listClusterVms(ctx context.Context, client *http.Client, ep clusterResource
 	ctx, cancel := context.WithTimeout(ctx, clusterResourcesTimeout)
 	defer cancel()
 
-	url := strings.TrimRight(ep.URL, "/") + "/api2/json/cluster/resources?type=vm"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	base, err := apiBaseURL(ep.URL)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api2/json/cluster/resources?type=vm", nil)
 	if err != nil {
 		return nil, err
 	}

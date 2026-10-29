@@ -280,12 +280,22 @@ not exist yet. The VM resources are created with `migrate: true`, so a node chan
 planned as a replace: when the state is stale the update fails instead of re-creating the VM.
 
 The listing reads `GET /cluster/resources?type=vm` (cluster cache, milliseconds). The
-credential is resolved in the same order as the provider: `proxmoxve:endpoint`,
-`proxmoxve:apiToken` and `proxmoxve:insecure` of the stack win; when absent, the environment
-variables `PROXMOX_VE_ENDPOINT`, `PROXMOX_VE_API_TOKEN` and `PROXMOX_VE_INSECURE` (or the
-`PM_VE_*` aliases) are used. A stack with only `proxmoxve:endpoint` and the token in
-`PROXMOX_VE_API_TOKEN` (as the iac-runner delivers it) takes the fast path. No extra secret and
-no new permission beyond the VM visibility the token already has.
+credential is resolved like the provider does (bpg `proxmoxtf/provider/provider.go`, the
+version used by `pulumi-proxmoxve` v7.13.0 is bpg v0.95.0): each item starts from the
+environment and the stack configuration overrides it.
+
+* `endpoint`: `PROXMOX_VE_ENDPOINT` (then `PM_VE_ENDPOINT`); `proxmoxve:endpoint` wins when not
+  empty. A trailing `/api2/json` is accepted, as in the provider.
+* `apiToken`: `PROXMOX_VE_API_TOKEN` (then `PM_VE_API_TOKEN`); `proxmoxve:apiToken` wins when
+  present in the stack, **even empty** (an empty token means no token, and the stack falls back
+  as below).
+* `insecure`: the environment variable counts as true only for exactly `true` or `1` (`TRUE`
+  does not); `proxmoxve:insecure: true` turns it on, but `false` in the stack does **not**
+  turn off a `true` environment variable.
+
+A stack with only `proxmoxve:endpoint` and the token in `PROXMOX_VE_API_TOKEN` (as the
+iac-runner delivers it) takes the fast path. No extra secret and no new permission beyond the
+VM visibility the token already has.
 
 The provider data source `getVirtualMachines` is avoided because it reads `/nodes/<node>/qemu`,
 where Proxmox collects the status of every VM of the node; on a loaded node that exceeded 30 s
