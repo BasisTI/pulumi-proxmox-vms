@@ -274,11 +274,19 @@ in Proxmox is found again. Its **update** path does not: it uses the node stored
 and a VM migrated after the last refresh makes `pulumi up` fail with
 `error retrieving VM <id>: the requested resource does not exist`.
 
-Since v2.3.0 the component also lists the VMs of the cluster (`getVirtualMachines`) on every
-run, matches each configured VM by name (templates are skipped, duplicate names are an error)
+Since v2.3.0 the component also lists the VMs of the cluster on every run, matches each configured VM by name (templates are skipped, duplicate names are an error)
 and passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to create VMs that do
 not exist yet. The VM resources are created with `migrate: true`, so a node change is never
 planned as a replace: when the state is stale the update fails instead of re-creating the VM.
+
+The listing reads `GET /cluster/resources?type=vm` (cluster cache, milliseconds) with the
+`proxmoxve:endpoint`, `proxmoxve:apiToken` and `proxmoxve:insecure` of the stack: no extra
+secret, and no new permission beyond the VM visibility the token already has. The provider
+data source `getVirtualMachines` is avoided because it reads `/nodes/<node>/qemu`, where
+Proxmox collects the status of every VM of the node; on a loaded node that exceeded 30 s and
+the proxy answered HTTP 596. Stacks authenticated by username/password or ticket (no
+`proxmoxve:apiToken`) still use `getVirtualMachines`. A failure of `/cluster/resources` is an
+error; it never falls back silently.
 
 **After a VM is migrated in Proxmox**, refresh before applying:
 
