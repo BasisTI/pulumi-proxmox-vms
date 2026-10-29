@@ -249,17 +249,19 @@ func diskSpeedPaths(diskCount int) []string {
 // another node keeps being managed instead of failing with "the requested resource does not
 // exist". VMs not found (not created yet) are absent from the map.
 //
-// With an API token in the provider configuration the answer comes from /cluster/resources
+// With an API token (stack configuration or PROXMOX_VE_API_TOKEN) the answer comes from /cluster/resources
 // (cheap, cluster cache). Otherwise it falls back to the provider data source, which reads
 // /nodes/<node>/qemu and can be slow on a loaded node.
 func resolveVmNodes(ctx *pulumi.Context, vms []VmData) (map[string]string, error) {
-	if ep, ok := clusterResourcesFromConfig(ctx); ok {
+	ep, ok, reason := clusterResourcesFromConfig(ctx)
+	if ok {
 		found, err := listClusterVms(ctx.Context(), newClusterResourcesClient(ep), ep)
 		if err != nil {
 			return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
 		}
 		return nodesByName(found, vms)
 	}
+	_ = ctx.Log.Warn("Looking up the VM nodes with getVirtualMachines, which reads /nodes/<node>/qemu and can exceed the proxy limit (HTTP 596) on a loaded node: "+reason, nil)
 	res, err := vm.GetVirtualMachines(ctx, &vm.GetVirtualMachinesArgs{})
 	if err != nil {
 		return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)

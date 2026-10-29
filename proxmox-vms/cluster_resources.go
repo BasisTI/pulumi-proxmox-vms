@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,20 +29,53 @@ type clusterResourcesEndpoint struct {
 	Insecure bool
 }
 
-// clusterResourcesFromConfig reads the provider configuration. ok is false when the provider
-// is not authenticated by API token (username/password, ticket): the ticket flow is not
-// reimplemented here, and the caller falls back to the provider data source.
-func clusterResourcesFromConfig(ctx *pulumi.Context) (ep clusterResourcesEndpoint, ok bool) {
-	url := pconfig.Get(ctx, "proxmoxve:endpoint")
-	token := pconfig.Get(ctx, "proxmoxve:apiToken")
-	if url == "" || token == "" {
-		return clusterResourcesEndpoint{}, false
+// clusterResourcesFromConfig reads the credential the way the provider does (see
+// resolveClusterResources). ok is false when the provider is not authenticated by API token
+// (username/password, ticket): the ticket flow is not reimplemented here, and the caller
+// falls back to the provider data source. reason says what was missing.
+func clusterResourcesFromConfig(ctx *pulumi.Context) (ep clusterResourcesEndpoint, ok bool, reason string) {
+	return resolveClusterResources(
+		func(key string) string { return pconfig.Get(ctx, "proxmoxve:"+key) },
+		os.Getenv,
+	)
+}
+
+// resolveClusterResources mirrors bpg/terraform-provider-proxmox v0.118.1: each item starts from
+// the environment variable and the stack configuration overrides it when set
+// (proxmoxtf/provider/provider.go:53-69 and :83-85 for the SDK provider, which serves the VMs
+// data source; fwprovider/provider.go:386-404 for the framework provider). The PM_VE_* names
+// are aliases accepted by the SDK provider, after PROXMOX_VE_* (utils/env.go GetAnyStringEnv).
+//
+// A stack that carries only proxmoxve:endpoint, with the token in PROXMOX_VE_API_TOKEN, as the
+// iac-runner delivers it, resolves to the endpoint of the stack and the token of the environment.
+func resolveClusterResources(cfg func(key string) string, env func(name string) string) (ep clusterResourcesEndpoint, ok bool, reason string) {
+	anyEnv := func(names ...string) string {
+		for _, n := range names {
+			if v := env(n); v != "" {
+				return v
+			}
+		}
+		return ""
 	}
-	return clusterResourcesEndpoint{
-		URL:      url,
-		ApiToken: token,
-		Insecure: pconfig.GetBool(ctx, "proxmoxve:insecure"),
-	}, true
+	pick := func(key string, names ...string) string {
+		if v := cfg(key); v != "" {
+			return v
+		}
+		return anyEnv(names...)
+	}
+
+	ep.URL = pick("endpoint", "PROXMOX_VE_ENDPOINT", "PM_VE_ENDPOINT")
+	ep.ApiToken = pick("apiToken", "PROXMOX_VE_API_TOKEN", "PM_VE_API_TOKEN")
+	insecure := pick("insecure", "PROXMOX_VE_INSECURE", "PM_VE_INSECURE")
+	ep.Insecure, _ = strconv.ParseBool(insecure)
+
+	switch {
+	case ep.URL == "":
+		return clusterResourcesEndpoint{}, false, "no endpoint (proxmoxve:endpoint or PROXMOX_VE_ENDPOINT)"
+	case ep.ApiToken == "":
+		return clusterResourcesEndpoint{}, false, "no API token (proxmoxve:apiToken or PROXMOX_VE_API_TOKEN); the provider authenticates by username/password or ticket"
+	}
+	return ep, true, ""
 }
 
 // clusterResource is one entry of GET /cluster/resources?type=vm.

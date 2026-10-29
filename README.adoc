@@ -279,14 +279,23 @@ and passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to creat
 not exist yet. The VM resources are created with `migrate: true`, so a node change is never
 planned as a replace: when the state is stale the update fails instead of re-creating the VM.
 
-The listing reads `GET /cluster/resources?type=vm` (cluster cache, milliseconds) with the
-`proxmoxve:endpoint`, `proxmoxve:apiToken` and `proxmoxve:insecure` of the stack: no extra
-secret, and no new permission beyond the VM visibility the token already has. The provider
-data source `getVirtualMachines` is avoided because it reads `/nodes/<node>/qemu`, where
-Proxmox collects the status of every VM of the node; on a loaded node that exceeded 30 s and
-the proxy answered HTTP 596. Stacks authenticated by username/password or ticket (no
-`proxmoxve:apiToken`) still use `getVirtualMachines`. A failure of `/cluster/resources` is an
-error; it never falls back silently.
+The listing reads `GET /cluster/resources?type=vm` (cluster cache, milliseconds). The
+credential is resolved in the same order as the provider: `proxmoxve:endpoint`,
+`proxmoxve:apiToken` and `proxmoxve:insecure` of the stack win; when absent, the environment
+variables `PROXMOX_VE_ENDPOINT`, `PROXMOX_VE_API_TOKEN` and `PROXMOX_VE_INSECURE` (or the
+`PM_VE_*` aliases) are used. A stack with only `proxmoxve:endpoint` and the token in
+`PROXMOX_VE_API_TOKEN` (as the iac-runner delivers it) takes the fast path. No extra secret and
+no new permission beyond the VM visibility the token already has.
+
+The provider data source `getVirtualMachines` is avoided because it reads `/nodes/<node>/qemu`,
+where Proxmox collects the status of every VM of the node; on a loaded node that exceeded 30 s
+and the proxy answered HTTP 596.
+
+**Fallback.** Without an API token anywhere (stacks authenticated by username/password or
+ticket, such as today's `kubernetes` and `docker`) the component keeps using
+`getVirtualMachines`, so those stacks are **not** protected from the HTTP 596. The ticket flow
+is not implemented. Each run on that path logs a warning (`ctx.Log.Warn`) with the reason.
+A failure of `/cluster/resources` itself is an error; it never falls back silently.
 
 **After a VM is migrated in Proxmox**, refresh before applying:
 

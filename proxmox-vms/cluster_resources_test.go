@@ -75,3 +75,54 @@ func TestListClusterVmsReportsHttpErrorWithoutToken(t *testing.T) {
 		t.Fatalf("error leaks the token: %v", err)
 	}
 }
+
+func fakeLookup(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+func TestResolveClusterResourcesTokenFromEnvEndpointFromStack(t *testing.T) {
+	// The build-agent case: only proxmoxve:endpoint in the stack, token delivered by the iac-runner.
+	ep, ok, reason := resolveClusterResources(
+		fakeLookup(map[string]string{"endpoint": "https://pve:8006/"}),
+		fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "u@pve!t=s", "PROXMOX_VE_INSECURE": "true"}),
+	)
+	if !ok || reason != "" {
+		t.Fatalf("ok = %v, reason = %q", ok, reason)
+	}
+	want := clusterResourcesEndpoint{URL: "https://pve:8006/", ApiToken: "u@pve!t=s", Insecure: true}
+	if ep != want {
+		t.Fatalf("ep = %+v, want %+v", ep, want)
+	}
+}
+
+func TestResolveClusterResourcesStackWinsOverEnvironment(t *testing.T) {
+	ep, ok, _ := resolveClusterResources(
+		fakeLookup(map[string]string{"endpoint": "https://stack", "apiToken": "stack-token"}),
+		fakeLookup(map[string]string{"PROXMOX_VE_ENDPOINT": "https://env", "PROXMOX_VE_API_TOKEN": "env-token", "PM_VE_ENDPOINT": "https://alias"}),
+	)
+	if !ok || ep.URL != "https://stack" || ep.ApiToken != "stack-token" {
+		t.Fatalf("ep = %+v, ok = %v", ep, ok)
+	}
+}
+
+func TestResolveClusterResourcesEndpointFromEnvironmentAndAlias(t *testing.T) {
+	ep, ok, _ := resolveClusterResources(fakeLookup(nil),
+		fakeLookup(map[string]string{"PM_VE_ENDPOINT": "https://alias", "PROXMOX_VE_API_TOKEN": "t"}))
+	if !ok || ep.URL != "https://alias" || ep.Insecure {
+		t.Fatalf("ep = %+v, ok = %v", ep, ok)
+	}
+}
+
+func TestResolveClusterResourcesWithoutTokenFallsBack(t *testing.T) {
+	// kubernetes and docker stacks: username/password, no token anywhere.
+	_, ok, reason := resolveClusterResources(
+		fakeLookup(map[string]string{"endpoint": "https://pve", "username": "root@pam"}),
+		fakeLookup(map[string]string{"PROXMOX_VE_PASSWORD": "x"}))
+	if ok || !strings.Contains(reason, "API token") {
+		t.Fatalf("ok = %v, reason = %q", ok, reason)
+	}
+	_, ok, reason = resolveClusterResources(fakeLookup(nil), fakeLookup(map[string]string{"PROXMOX_VE_API_TOKEN": "t"}))
+	if ok || !strings.Contains(reason, "endpoint") {
+		t.Fatalf("ok = %v, reason = %q", ok, reason)
+	}
+}
