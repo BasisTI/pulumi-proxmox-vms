@@ -274,11 +274,38 @@ in Proxmox is found again. Its **update** path does not: it uses the node stored
 and a VM migrated after the last refresh makes `pulumi up` fail with
 `error retrieving VM <id>: the requested resource does not exist`.
 
-Since v2.3.0 the component also lists the VMs of the cluster (`getVirtualMachines`) on every
-run, matches each configured VM by name (templates are skipped, duplicate names are an error)
+Since v2.3.0 the component also lists the VMs of the cluster on every run, matches each configured VM by name (templates are skipped, duplicate names are an error)
 and passes the node Proxmox reports. `proxmoxCfg.nodeName` is only used to create VMs that do
 not exist yet. The VM resources are created with `migrate: true`, so a node change is never
 planned as a replace: when the state is stale the update fails instead of re-creating the VM.
+
+The listing reads `GET /cluster/resources?type=vm` (cluster cache, milliseconds). The
+credential is resolved like the provider does (bpg `proxmoxtf/provider/provider.go`, the
+version used by `pulumi-proxmoxve` v7.13.0 is bpg v0.95.0): each item starts from the
+environment and the stack configuration overrides it.
+
+* `endpoint`: `PROXMOX_VE_ENDPOINT` (then `PM_VE_ENDPOINT`); `proxmoxve:endpoint` wins when not
+  empty. A trailing `/api2/json` is accepted, as in the provider.
+* `apiToken`: `PROXMOX_VE_API_TOKEN` (then `PM_VE_API_TOKEN`); `proxmoxve:apiToken` wins when
+  present in the stack, **even empty** (an empty token means no token, and the stack falls back
+  as below).
+* `insecure`: the environment variable counts as true only for exactly `true` or `1` (`TRUE`
+  does not); `proxmoxve:insecure: true` turns it on, but `false` in the stack does **not**
+  turn off a `true` environment variable.
+
+A stack with only `proxmoxve:endpoint` and the token in `PROXMOX_VE_API_TOKEN` (as the
+iac-runner delivers it) takes the fast path. No extra secret and no new permission beyond the
+VM visibility the token already has.
+
+The provider data source `getVirtualMachines` is avoided because it reads `/nodes/<node>/qemu`,
+where Proxmox collects the status of every VM of the node; on a loaded node that exceeded 30 s
+and the proxy answered HTTP 596.
+
+**Fallback.** Without an API token anywhere (stacks authenticated by username/password or
+ticket, such as today's `kubernetes` and `docker`) the component keeps using
+`getVirtualMachines`, so those stacks are **not** protected from the HTTP 596. The ticket flow
+is not implemented. Each run on that path logs a warning (`ctx.Log.Warn`) with the reason.
+A failure of `/cluster/resources` itself is an error; it never falls back silently.
 
 **After a VM is migrated in Proxmox**, refresh before applying:
 
