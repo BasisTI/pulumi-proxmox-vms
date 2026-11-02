@@ -12,6 +12,7 @@ This repository contains a Pulumi component for quickly creating and managing Pr
 * QEMU guest agent support
 * HA migration drift protection via `IgnoreChanges` on `nodeName`
 * Changing `templateVmId` does not replace existing VMs (see <<template-change>>)
+* A new VM is refused when its `templateVmId` is not a template (see <<template-guard>>)
 * Easy configuration through Pulumi YAML files
 
 == Installation
@@ -22,6 +23,56 @@ Add this component to your Go project:
 ----
 go get github.com/BasisTI/pulumi-proxmox-vms
 ----
+
+=== Pulumi SDK fork (required since v2.9.0)
+
+[[sdk-fork]]
+The template guard (see <<template-guard>>) uses a Pulumi resource hook. The Pulumi Go SDK
+(`github.com/pulumi/pulumi/sdk/v3`, checked in v3.219.0, v3.220.0, v3.224.0 and master) drops the
+error of a failed hook registration in `registerResource`: with a CLI without hooks support, or a
+registration the engine rejects, the VM is silently left out of the program and the program
+succeeds. `BasisTI/pulumi` is a fork of the SDK with the one-line fix (the error is delivered to
+the deferred `endRPC`), tag `sdk/v3.219.0-basis.1` (Go version `v3.219.0-basis.1`; the `sdk/`
+prefix is the tag of a submodule).
+
+*A `replace` in a library module does not apply to the modules that import it.* The `go.mod` of
+this component carries it, but every stack that imports the component needs the same line in its
+own `go.mod`:
+
+[source,go]
+----
+replace github.com/pulumi/pulumi/sdk/v3 => github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1
+----
+
+plus, *until the Go proxy resolves the fork tag*, the two checksum lines of the fork in the `go.sum`
+of the stack (paste them verbatim, e.g. `cat >> go.sum`):
+
+[source,text]
+----
+github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1 h1:k+xgxUzSwGA2j//ZdljlDuL4F5FJyOwm1wDXbJ0Rycc=
+github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1/go.mod h1:ZOBPPC2NZOZf729AdCX+CctfNc5SN6aJh0bdqNdzQC4=
+----
+
+Why: `proxy.golang.org` and `sum.golang.org` still answer 404 ("unknown revision
+`sdk/v3.219.0-basis.1`") for the fork, so with only the `replace` `go mod tidy`/`go build` fail in
+the checksum verification. With the two lines already in `go.sum` the module is fetched and checked
+against them. Do *not* disable the checksum database (`GOSUMDB=off`, `GONOSUMDB`, `GOFLAGS=-insecure`) and
+do not move the tag: the hashes pin the exact code. Validated with a clean module cache: replace
+only fails with the 404, replace plus the two lines runs `go mod tidy` and `go build` successfully.
+Once the proxy resolves the tag the two lines are produced by `go mod tidy` and can be left to it.
+The stack should already require `github.com/pulumi/pulumi/sdk/v3 v3.219.0` (v3.224.0 also works: the
+replace pins the code to the fork, based on v3.219.0). Without the replace the stack compiles
+against the upstream SDK and a rejected hook registration is silent again.
+
+*Guarantee, and its limits:* with the fork, registering a resource that has a hook bound to it
+fails the program when the registration of that hook fails. A hook registered but not bound to a
+resource, and `ReadResource`, still do not report such an error globally (out of scope of the fix).
+The component only binds hooks to the VM resources, which is the covered case.
+
+*Removing the replace:* first raise the `require` of `github.com/pulumi/pulumi/sdk/v3` to an upstream
+version that contains the fix, run the regression tests (this repository's `go test ./...`, in
+particular the two "fails and registers nothing" tests, and the stack's own checks), and only then
+delete the `replace` (and the two fork lines of `go.sum`, via `go mod tidy`).
 
 == Usage
 
@@ -354,6 +405,38 @@ VMs created afterwards use the new template. This is how a monthly rebuilt templ
 (`linkedClone: false`), so deleting the old template from Proxmox causes no drift. The same
 property applies to `linkedClone` and the other `clone` fields: after creation they are not
 managed.
+
+[[template-guard]]
+== A new VM must be cloned from a template
+
+Since v2.9.0 (this repository has no changelog file; versions are recorded in this README and in
+the git tags) the component checks, before creating a VM, that the source id
+(`vms[].templateVmId`, else `proxmoxCfg.templateVmId`) is a Proxmox template (`template=1`).
+Otherwise `pulumi preview`/`up` fails naming the VM, the id, what the id is today (the name of
+the regular VM that holds it, or "no VM has it") and what to do: use a current template (the
+`add-vm` of the Plataforma picks the most recent one).
+
+Why: the monthly retention of `vm_templates` deletes old templates, and Proxmox reuses the freed id.
+An id left in the stack could then be a running production VM, which a new VM would clone.
+
+* The check is a Pulumi `BeforeCreate` resource hook (also run on preview), so it fires exactly when
+  the engine is about to create the resource: the engine, not the program, knows what is in the
+  state. A VM that is only kept, updated or deleted (same/update/delete steps) has no create step,
+  so the hook does not run for it and an orphan id of a live VM (or an id gone altogether) never
+  breaks a routine preview. A namesake VM in the cluster
+  (another stack, a manual VM) does not lift the check.
+* Every create is checked, replacements included: renaming a VM in the stack (new URN) or any
+  change that replaces it clones again, so it needs a current template id. With
+  delete-before-create the refusal can come after the delete; the hook also runs on preview, which
+  is the time to catch it, so always read the preview first.
+* No extra call: the hook reuses the listing already made for node discovery (`/cluster/resources`,
+  or the provider data source without an API token). Both are read-only, so a preview works with a
+  read-only token. The token must see the template (`VM.Audit` on `/vms/<id>`), or the id counts as
+  missing.
+* Requires a Pulumi CLI with resource hooks support, and the SDK fork of <<sdk-fork>>. With an
+  older CLI, or a hook registration the engine rejects, the program fails with the engine's error
+  ("the Pulumi CLI does not support resource hooks...") and no VM is registered. With the upstream
+  SDK that failure is swallowed and the VM silently omitted, which is why the replace is required.
 
 == Migrating from vSphere
 

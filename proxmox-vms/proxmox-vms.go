@@ -99,7 +99,11 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 		return nil, err
 	}
 
-	nodes, err := resolveVmNodes(ctx, args.Vms)
+	found, err := listProxmoxVms(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := nodesByName(found, args.Vms)
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +130,12 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 			_ = ctx.Log.Info(fmt.Sprintf("VM %s lives on node %s (proxmoxCfg.nodeName is %s); using the real node",
 				vmData.Name, nodeName, args.ProxmoxCfg.NodeName), nil)
 		}
+
+		guard, err := templateGuardOption(ctx, found, vmData, args.ProxmoxCfg)
+		if err != nil {
+			return nil, err
+		}
+		resOpts = append(resOpts, guard)
 
 		newVm, err := createVm(ctx, args.ProxmoxCfg, args.NetworkCfg, vmData, nodeName, resOpts...)
 		if err != nil {
@@ -245,28 +255,87 @@ func diskSpeedPaths(diskCount int) []string {
 	return paths
 }
 
-// resolveVmNodes asks Proxmox where each configured VM currently lives, so a VM migrated to
-// another node keeps being managed instead of failing with "the requested resource does not
-// exist". VMs not found (not created yet) are absent from the map.
+// listProxmoxVms lists the QEMU VMs and templates of the cluster. The answer feeds both the node
+// lookup (where each VM lives) and the template guard (checkTemplate), so it is read once.
 //
 // With an API token (stack configuration or PROXMOX_VE_API_TOKEN) the answer comes from /cluster/resources
 // (cheap, cluster cache). Otherwise it falls back to the provider data source, which reads
-// /nodes/<node>/qemu and can be slow on a loaded node.
-func resolveVmNodes(ctx *pulumi.Context, vms []VmData) (map[string]string, error) {
+// /nodes/<node>/qemu and can be slow on a loaded node. Both are read-only calls.
+func listProxmoxVms(ctx *pulumi.Context) ([]vm.GetVirtualMachinesVm, error) {
 	ep, ok, reason := clusterResourcesFromConfig(ctx)
 	if ok {
 		found, err := listClusterVms(ctx.Context(), newClusterResourcesClient(ep), ep)
 		if err != nil {
 			return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
 		}
-		return nodesByName(found, vms)
+		return found, nil
 	}
 	_ = ctx.Log.Warn("Looking up the VM nodes with getVirtualMachines, which reads /nodes/<node>/qemu and can exceed the proxy limit (HTTP 596) on a loaded node: "+reason, nil)
 	res, err := vm.GetVirtualMachines(ctx, &vm.GetVirtualMachinesArgs{})
 	if err != nil {
 		return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
 	}
-	return nodesByName(res.Vms, vms)
+	return res.Vms, nil
+}
+
+// templateGuardOption binds the template check to the creation of the VM resource, as a
+// BeforeCreate resource hook that also runs on preview (OnDryRun).
+//
+// Why a hook and not a check by name: whether a resource is new is the engine's knowledge (its
+// URN is not in the state), and the program cannot read the state. Deciding "new" by the VM name
+// in the cluster is wrong both ways: a namesake (another stack, a manual VM) hides a real
+// creation, and renaming a VM in the stack (a new URN, so a real create) would be judged by the
+// old name. A BeforeCreate hook runs exactly when the engine is about to create the resource; for
+// a resource that exists in the state and is only kept or updated (same/update/delete steps) there
+// is no create step, so the hook does not run and an orphan id of a live VM never breaks a routine
+// preview. Every create does run it, replacements included (a rename or any replace clones again
+// and needs a current template). With delete-before-create the refusal can come after the delete,
+// so the preview, where the hook also runs, is the time to catch it.
+//
+// The hook closes over the listing already made for the node lookup: no extra call.
+func templateGuardOption(ctx *pulumi.Context, found []vm.GetVirtualMachinesVm, vmData VmData, proxmoxCfg ProxmoxCfg) (pulumi.ResourceOption, error) {
+	id := templateVmIdFor(proxmoxCfg, vmData)
+	return newCreateGuard(ctx, "template-guard-"+vmData.Name, func() error {
+		return checkTemplate(found, vmData.Name, id)
+	})
+}
+
+// newCreateGuard registers fn as a BeforeCreate hook, run on preview too. A non-nil error from a
+// before_* hook fails the operation (see pulumi.ResourceHookBinding).
+//
+// A failed registration (engine without hooks support, or a registration the engine rejects) must
+// fail the program. The upstream Pulumi Go SDK (up to v3.224.0 and master at the time of writing)
+// drops that error in registerResource and omits the VM in silence; go.mod therefore replaces the
+// SDK by the fork github.com/BasisTI/pulumi, tag sdk/v3.219.0-basis.1, which propagates it (see
+// README, "Pulumi SDK fork"). It is a variable so the unit tests, whose mock monitor has no hook
+// support, can capture the hook instead; the real registration is covered in hooks_grpc_test.go.
+var newCreateGuard = func(ctx *pulumi.Context, name string, fn func() error) (pulumi.ResourceOption, error) {
+	hook, err := ctx.RegisterResourceHook(name, func(*pulumi.ResourceHookArgs) error { return fn() },
+		&pulumi.ResourceHookOptions{OnDryRun: true})
+	if err != nil {
+		return nil, err
+	}
+	return pulumi.ResourceHooks(&pulumi.ResourceHookBinding{BeforeCreate: []*pulumi.ResourceHook{hook}}), nil
+}
+
+// checkTemplate fails unless id is a template in the cluster listing. The message names the VM,
+// the id, what the id is today and what to do.
+func checkTemplate(found []vm.GetVirtualMachinesVm, vmName string, id int) error {
+	for _, f := range found {
+		if f.VmId != id {
+			continue
+		}
+		if f.Template != nil && *f.Template {
+			return nil
+		}
+		return fmt.Errorf("VM %q is being created from id %d, but that id is the regular VM %q (node %s), not a template; "+
+			"set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+			vmName, id, f.Name, f.NodeName)
+	}
+	return fmt.Errorf("VM %q is being created from id %d, but no VM or template has that id in the Proxmox cluster, "+
+		"or the API token cannot see it: check that the token has VM.Audit on the template (/vms/%d); "+
+		"otherwise set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+		vmName, id, id)
 }
 
 // nodesByName maps each wanted VM name to the node where Proxmox reports it. Templates are
