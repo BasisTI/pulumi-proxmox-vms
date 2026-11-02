@@ -44,10 +44,35 @@ own `go.mod`:
 replace github.com/pulumi/pulumi/sdk/v3 => github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1
 ----
 
-then `go mod tidy`. The stack should already require `github.com/pulumi/pulumi/sdk/v3 v3.219.0`
-(v3.224.0 is also fine: the replace pins the code to the fork, based on v3.219.0). Without the
-replace the stack compiles against the upstream SDK and a rejected hook registration is silent
-again. Remove the replace when upstream releases the fix.
+plus, *until the Go proxy resolves the fork tag*, the two checksum lines of the fork in the `go.sum`
+of the stack (paste them verbatim, e.g. `cat >> go.sum`):
+
+[source,text]
+----
+github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1 h1:k+xgxUzSwGA2j//ZdljlDuL4F5FJyOwm1wDXbJ0Rycc=
+github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1/go.mod h1:ZOBPPC2NZOZf729AdCX+CctfNc5SN6aJh0bdqNdzQC4=
+----
+
+Why: `proxy.golang.org` and `sum.golang.org` still answer 404 ("unknown revision
+`sdk/v3.219.0-basis.1`") for the fork, so with only the `replace` `go mod tidy`/`go build` fail in
+the checksum verification. With the two lines already in `go.sum` the module is fetched and checked
+against them. Do *not* disable the checksum database (`GOSUMDB=off`, `GONOSUMDB`, `GOFLAGS=-insecure`) and
+do not move the tag: the hashes pin the exact code. Validated with a clean module cache: replace
+only fails with the 404, replace plus the two lines runs `go mod tidy` and `go build` successfully.
+Once the proxy resolves the tag the two lines are produced by `go mod tidy` and can be left to it.
+The stack should already require `github.com/pulumi/pulumi/sdk/v3 v3.219.0` (v3.224.0 also works: the
+replace pins the code to the fork, based on v3.219.0). Without the replace the stack compiles
+against the upstream SDK and a rejected hook registration is silent again.
+
+*Guarantee, and its limits:* with the fork, registering a resource that has a hook bound to it
+fails the program when the registration of that hook fails. A hook registered but not bound to a
+resource, and `ReadResource`, still do not report such an error globally (out of scope of the fix).
+The component only binds hooks to the VM resources, which is the covered case.
+
+*Removing the replace:* first raise the `require` of `github.com/pulumi/pulumi/sdk/v3` to an upstream
+version that contains the fix, run the regression tests (this repository's `go test ./...`, in
+particular the two "fails and registers nothing" tests, and the stack's own checks), and only then
+delete the `replace` (and the two fork lines of `go.sum`, via `go mod tidy`).
 
 == Usage
 
