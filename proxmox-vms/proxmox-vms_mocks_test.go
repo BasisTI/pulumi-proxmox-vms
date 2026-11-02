@@ -2,6 +2,7 @@ package proxmox_vms
 
 import (
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -17,10 +18,18 @@ type registeredVm struct {
 	ignoreChanges []string
 }
 
-// vmMocks records every VM registration and answers the node lookup with an empty cluster.
+// vmMocks records every VM registration and answers the VM listing with the cluster field.
 type vmMocks struct {
-	mu  sync.Mutex
-	vms map[string]registeredVm
+	mu      sync.Mutex
+	vms     map[string]registeredVm
+	cluster []clusterVm
+}
+
+// clusterVm is one entry of the fake cluster listing.
+type clusterVm struct {
+	id       int
+	name     string
+	template bool
 }
 
 func (m *vmMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
@@ -36,13 +45,34 @@ func (m *vmMocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Pr
 }
 
 func (m *vmMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
-	return resource.PropertyMap{"vms": resource.NewArrayProperty(nil)}, nil
+	var list []resource.PropertyValue
+	for _, c := range m.cluster {
+		list = append(list, resource.NewObjectProperty(resource.PropertyMap{
+			"name":     resource.NewStringProperty(c.name),
+			"nodeName": resource.NewStringProperty("siliconvalley"),
+			"vmId":     resource.NewNumberProperty(float64(c.id)),
+			"template": resource.NewBoolProperty(c.template),
+		}))
+	}
+	return resource.PropertyMap{"vms": resource.NewArrayProperty(list)}, nil
 }
+
+// defaultCluster has the shared template 9000 only.
+var defaultCluster = []clusterVm{{id: 9000, name: "ubuntu-template", template: true}}
 
 // registerVms runs the component under mocks and returns what was registered for each VM.
 func registerVms(t *testing.T, vms []VmData) map[string]registeredVm {
 	t.Helper()
-	mocks := &vmMocks{vms: map[string]registeredVm{}}
+	got, err := runVms(vms, defaultCluster)
+	if err != nil {
+		t.Fatalf("NewProxmoxVms() error = %v", err)
+	}
+	return got
+}
+
+// runVms runs the component against a fake cluster and returns the registrations and the error.
+func runVms(vms []VmData, cluster []clusterVm) (map[string]registeredVm, error) {
+	mocks := &vmMocks{vms: map[string]registeredVm{}, cluster: cluster}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		_, err := NewProxmoxVms(ctx, "test", &ProxmoxVmsArgs{
 			Vms: vms,
@@ -56,10 +86,7 @@ func registerVms(t *testing.T, vms []VmData) map[string]registeredVm {
 		})
 		return err
 	}, pulumi.WithMocks("project", "stack", mocks))
-	if err != nil {
-		t.Fatalf("NewProxmoxVms() error = %v", err)
-	}
-	return mocks.vms
+	return mocks.vms, err
 }
 
 func TestVmIgnoresOnlyTheDiskSpeedBlockAndClone(t *testing.T) {
@@ -102,5 +129,66 @@ func TestVmDiskKeepsSizeManagedAndSendsNoSpeed(t *testing.T) {
 	}
 	if _, ok := disk["speed"]; ok {
 		t.Fatalf("disks[0].speed must not be sent: zero limits are what Proxmox reports as absent, got %v", disk["speed"])
+	}
+}
+
+func TestNewVmFromARegularVmIdIsRefused(t *testing.T) {
+	cluster := append([]clusterVm{{id: 138, name: "cochem", template: false}}, defaultCluster...)
+
+	got, err := runVms([]VmData{{Name: "nova", TemplateVmId: 138, NumCpus: 2, Memory: 1024}}, cluster)
+
+	if err == nil {
+		t.Fatal("a new VM cloned from a regular VM must be refused")
+	}
+	for _, want := range []string{`"nova"`, "138", `"cochem"`, "not a template", "templateVmId"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q must mention %s", err, want)
+		}
+	}
+	if _, ok := got["nova"]; ok {
+		t.Fatal("the VM must not be registered when the guard refuses it")
+	}
+}
+
+func TestNewVmFromAMissingIdIsRefused(t *testing.T) {
+	_, err := runVms([]VmData{{Name: "nova", TemplateVmId: 4242, NumCpus: 2, Memory: 1024}}, defaultCluster)
+
+	if err == nil || !strings.Contains(err.Error(), "4242") || !strings.Contains(err.Error(), `"nova"`) {
+		t.Fatalf("an unknown id must be refused naming the VM and the id, got %v", err)
+	}
+}
+
+func TestNewVmFromATemplateIsAccepted(t *testing.T) {
+	got, err := runVms([]VmData{{Name: "nova", TemplateVmId: 9001, NumCpus: 2, Memory: 1024}},
+		append([]clusterVm{{id: 9001, name: "ubuntu-new", template: true}}, defaultCluster...))
+
+	if err != nil {
+		t.Fatalf("a template id must pass, got %v", err)
+	}
+	if _, ok := got["nova"]; !ok {
+		t.Fatal("VM nova was not registered")
+	}
+}
+
+func TestExistingVmWithAnOrphanIdIsNotChecked(t *testing.T) {
+	cluster := append([]clusterVm{{id: 138, name: "cochem"}, {id: 120, name: "chur"}}, defaultCluster...)
+
+	got, err := runVms([]VmData{
+		{Name: "chur", TemplateVmId: 138, NumCpus: 2, Memory: 1024},   // id of a regular VM
+		{Name: "chur2", TemplateVmId: 9000, NumCpus: 2, Memory: 1024}, // new, valid
+	}, append(cluster, clusterVm{id: 121, name: "chur2"}))
+
+	if err != nil {
+		t.Fatalf("an existing VM must not be checked, got %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("both VMs must be registered, got %d", len(got))
+	}
+}
+
+func TestCheckTemplatesFallsBackToTheSharedTemplate(t *testing.T) {
+	err := checkTemplates(nil, []VmData{{Name: "nova"}}, ProxmoxCfg{TemplateVmId: 138})
+	if err == nil || !strings.Contains(err.Error(), "138") {
+		t.Fatalf("the shared templateVmId must be checked too, got %v", err)
 	}
 }

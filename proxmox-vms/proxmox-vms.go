@@ -99,8 +99,15 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 		return nil, err
 	}
 
-	nodes, err := resolveVmNodes(ctx, args.Vms)
+	found, err := listProxmoxVms(ctx)
 	if err != nil {
+		return nil, err
+	}
+	nodes, err := nodesByName(found, args.Vms)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkTemplates(found, args.Vms, args.ProxmoxCfg); err != nil {
 		return nil, err
 	}
 
@@ -245,28 +252,68 @@ func diskSpeedPaths(diskCount int) []string {
 	return paths
 }
 
-// resolveVmNodes asks Proxmox where each configured VM currently lives, so a VM migrated to
-// another node keeps being managed instead of failing with "the requested resource does not
-// exist". VMs not found (not created yet) are absent from the map.
+// listProxmoxVms lists the QEMU VMs and templates of the cluster. The answer feeds both the node
+// lookup (where each VM lives) and the template guard (checkTemplates), so it is read once.
 //
 // With an API token (stack configuration or PROXMOX_VE_API_TOKEN) the answer comes from /cluster/resources
 // (cheap, cluster cache). Otherwise it falls back to the provider data source, which reads
-// /nodes/<node>/qemu and can be slow on a loaded node.
-func resolveVmNodes(ctx *pulumi.Context, vms []VmData) (map[string]string, error) {
+// /nodes/<node>/qemu and can be slow on a loaded node. Both are read-only calls.
+func listProxmoxVms(ctx *pulumi.Context) ([]vm.GetVirtualMachinesVm, error) {
 	ep, ok, reason := clusterResourcesFromConfig(ctx)
 	if ok {
 		found, err := listClusterVms(ctx.Context(), newClusterResourcesClient(ep), ep)
 		if err != nil {
 			return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
 		}
-		return nodesByName(found, vms)
+		return found, nil
 	}
 	_ = ctx.Log.Warn("Looking up the VM nodes with getVirtualMachines, which reads /nodes/<node>/qemu and can exceed the proxy limit (HTTP 596) on a loaded node: "+reason, nil)
 	res, err := vm.GetVirtualMachines(ctx, &vm.GetVirtualMachinesArgs{})
 	if err != nil {
 		return nil, fmt.Errorf("listing the VMs of the Proxmox cluster: %w", err)
 	}
-	return nodesByName(res.Vms, vms)
+	return res.Vms, nil
+}
+
+// checkTemplates refuses to create a NEW VM from an id that is not a template.
+//
+// A VM is new when no non-template VM with its name exists in the cluster (the same test
+// nodesByName uses to decide the node). Existing VMs are not checked: the clone block is
+// ignored for them (clonePath), so an orphan id must not break a routine preview. The retention
+// of vm_templates deletes old templates and Proxmox reuses the freed id, so an id kept in the
+// stack can silently become a running VM, which a new VM would then clone.
+func checkTemplates(found []vm.GetVirtualMachinesVm, wanted []VmData, proxmoxCfg ProxmoxCfg) error {
+	existing := map[string]bool{}
+	byId := map[int]vm.GetVirtualMachinesVm{}
+	for _, f := range found {
+		if f.Template != nil && *f.Template {
+			byId[f.VmId] = f
+			continue
+		}
+		existing[f.Name] = true
+		byId[f.VmId] = f
+	}
+
+	for _, w := range wanted {
+		if existing[w.Name] {
+			continue
+		}
+		id := templateVmIdFor(proxmoxCfg, w)
+		src, ok := byId[id]
+		switch {
+		case ok && src.Template != nil && *src.Template:
+			// A template: fine.
+		case ok:
+			return fmt.Errorf("VM %q is new and would be cloned from id %d, but that id is the regular VM %q (node %s), not a template; "+
+				"set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+				w.Name, id, src.Name, src.NodeName)
+		default:
+			return fmt.Errorf("VM %q is new and would be cloned from id %d, but no VM or template has that id in the Proxmox cluster "+
+				"(or the API token cannot see it); set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+				w.Name, id)
+		}
+	}
+	return nil
 }
 
 // nodesByName maps each wanted VM name to the node where Proxmox reports it. Templates are
