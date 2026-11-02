@@ -369,13 +369,19 @@ the regular VM that holds it, or "no VM has it") and what to do: use a current t
 Why: the monthly retention of `vm_templates` deletes old templates, and Proxmox reuses the freed id.
 An id left in the stack could then be a running production VM, which a new VM would clone.
 
-* A VM is *new* when no non-template VM with its name exists in the cluster. Existing VMs are never
-  checked, since their `clone` is ignored (see <<template-change>>): an orphan id of a live VM does
-  not break a routine preview.
-* No extra call: it reuses the listing already made for node discovery (`/cluster/resources`, or
-  the provider data source without an API token). Both are read-only, so a preview works with a
-  read-only token. The token must be able to see the template (`VM.Audit`), or the id counts as
+* The check is a Pulumi `BeforeCreate` resource hook (also run on preview), so it fires exactly when
+  the engine is about to create the resource: the engine, not the program, knows what is in the
+  state. Existing VMs have no create step, so the hook does not run for them and an orphan id of a
+  live VM (or an id gone altogether) never breaks a routine preview. A namesake VM in the cluster
+  (another stack, a manual VM) does not lift the check.
+* Renaming a VM in the stack is a new resource (new URN), hence a real creation that clones
+  `templateVmId`: the check applies to it, so keep a current template id when renaming.
+* No extra call: the hook reuses the listing already made for node discovery (`/cluster/resources`,
+  or the provider data source without an API token). Both are read-only, so a preview works with a
+  read-only token. The token must see the template (`VM.Audit` on `/vms/<id>`), or the id counts as
   missing.
+* Requires a Pulumi CLI with resource hooks support (the SDK in `go.mod`, v3.219.0, already has
+  them). With an older CLI the program fails with "the Pulumi CLI does not support resource hooks".
 
 == Migrating from vSphere
 

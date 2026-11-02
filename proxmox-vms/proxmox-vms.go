@@ -107,9 +107,6 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 	if err != nil {
 		return nil, err
 	}
-	if err := checkTemplates(found, args.Vms, args.ProxmoxCfg); err != nil {
-		return nil, err
-	}
 
 	var virtualMachines []*vm.VirtualMachine
 	for _, vmData := range args.Vms {
@@ -133,6 +130,12 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 			_ = ctx.Log.Info(fmt.Sprintf("VM %s lives on node %s (proxmoxCfg.nodeName is %s); using the real node",
 				vmData.Name, nodeName, args.ProxmoxCfg.NodeName), nil)
 		}
+
+		guard, err := templateGuardOption(ctx, found, vmData, args.ProxmoxCfg)
+		if err != nil {
+			return nil, err
+		}
+		resOpts = append(resOpts, guard)
 
 		newVm, err := createVm(ctx, args.ProxmoxCfg, args.NetworkCfg, vmData, nodeName, resOpts...)
 		if err != nil {
@@ -275,45 +278,55 @@ func listProxmoxVms(ctx *pulumi.Context) ([]vm.GetVirtualMachinesVm, error) {
 	return res.Vms, nil
 }
 
-// checkTemplates refuses to create a NEW VM from an id that is not a template.
+// templateGuardOption binds the template check to the creation of the VM resource, as a
+// BeforeCreate resource hook that also runs on preview (OnDryRun).
 //
-// A VM is new when no non-template VM with its name exists in the cluster (the same test
-// nodesByName uses to decide the node). Existing VMs are not checked: the clone block is
-// ignored for them (clonePath), so an orphan id must not break a routine preview. The retention
-// of vm_templates deletes old templates and Proxmox reuses the freed id, so an id kept in the
-// stack can silently become a running VM, which a new VM would then clone.
-func checkTemplates(found []vm.GetVirtualMachinesVm, wanted []VmData, proxmoxCfg ProxmoxCfg) error {
-	existing := map[string]bool{}
-	byId := map[int]vm.GetVirtualMachinesVm{}
-	for _, f := range found {
-		if f.Template != nil && *f.Template {
-			byId[f.VmId] = f
-			continue
-		}
-		existing[f.Name] = true
-		byId[f.VmId] = f
-	}
+// Why a hook and not a check by name: whether a resource is new is the engine's knowledge (its
+// URN is not in the state), and the program cannot read the state. Deciding "new" by the VM name
+// in the cluster is wrong both ways: a namesake (another stack, a manual VM) hides a real
+// creation, and renaming a VM in the stack (a new URN, so a real create) would be judged by the
+// old name. A BeforeCreate hook runs exactly when the engine is about to create the resource; for
+// a resource that exists in the state there is no create step, so the hook does not run and an
+// orphan id of a live VM never breaks a routine preview.
+//
+// The hook closes over the listing already made for the node lookup: no extra call.
+func templateGuardOption(ctx *pulumi.Context, found []vm.GetVirtualMachinesVm, vmData VmData, proxmoxCfg ProxmoxCfg) (pulumi.ResourceOption, error) {
+	id := templateVmIdFor(proxmoxCfg, vmData)
+	return newCreateGuard(ctx, "template-guard-"+vmData.Name, func() error {
+		return checkTemplate(found, vmData.Name, id)
+	})
+}
 
-	for _, w := range wanted {
-		if existing[w.Name] {
+// newCreateGuard registers fn as a BeforeCreate hook, run on preview too. A non-nil error from a
+// before_* hook fails the operation (see pulumi.ResourceHookBinding). It is a variable so the unit
+// tests, whose mock monitor has no hook support, can capture the hook instead.
+var newCreateGuard = func(ctx *pulumi.Context, name string, fn func() error) (pulumi.ResourceOption, error) {
+	hook, err := ctx.RegisterResourceHook(name, func(*pulumi.ResourceHookArgs) error { return fn() },
+		&pulumi.ResourceHookOptions{OnDryRun: true})
+	if err != nil {
+		return nil, err
+	}
+	return pulumi.ResourceHooks(&pulumi.ResourceHookBinding{BeforeCreate: []*pulumi.ResourceHook{hook}}), nil
+}
+
+// checkTemplate fails unless id is a template in the cluster listing. The message names the VM,
+// the id, what the id is today and what to do.
+func checkTemplate(found []vm.GetVirtualMachinesVm, vmName string, id int) error {
+	for _, f := range found {
+		if f.VmId != id {
 			continue
 		}
-		id := templateVmIdFor(proxmoxCfg, w)
-		src, ok := byId[id]
-		switch {
-		case ok && src.Template != nil && *src.Template:
-			// A template: fine.
-		case ok:
-			return fmt.Errorf("VM %q is new and would be cloned from id %d, but that id is the regular VM %q (node %s), not a template; "+
-				"set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
-				w.Name, id, src.Name, src.NodeName)
-		default:
-			return fmt.Errorf("VM %q is new and would be cloned from id %d, but no VM or template has that id in the Proxmox cluster "+
-				"(or the API token cannot see it); set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
-				w.Name, id)
+		if f.Template != nil && *f.Template {
+			return nil
 		}
+		return fmt.Errorf("VM %q is being created from id %d, but that id is the regular VM %q (node %s), not a template; "+
+			"set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+			vmName, id, f.Name, f.NodeName)
 	}
-	return nil
+	return fmt.Errorf("VM %q is being created from id %d, but no VM or template has that id in the Proxmox cluster, "+
+		"or the API token cannot see it: check that the token has VM.Audit on the template (/vms/%d); "+
+		"otherwise set templateVmId to a current template (the add-vm of the Plataforma picks the most recent one)",
+		vmName, id, id)
 }
 
 // nodesByName maps each wanted VM name to the node where Proxmox reports it. Templates are
