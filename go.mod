@@ -92,3 +92,5 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/frand v1.4.2 // indirect
 )
+
+replace github.com/pulumi/pulumi/sdk/v3 => github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1

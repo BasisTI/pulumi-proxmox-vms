@@ -10,7 +10,9 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -30,6 +32,8 @@ type fakeEngine struct {
 	registered []*pulumirpc.RegisterResourceRequest
 	hooks      map[string]*pulumirpc.RegisterResourceHookRequest
 	invokes    int
+
+	rejectHooks error // when set, RegisterResourceHook answers with it
 }
 
 func (e *fakeEngine) SupportsFeature(_ context.Context, r *pulumirpc.SupportsFeatureRequest) (*pulumirpc.SupportsFeatureResponse, error) {
@@ -43,6 +47,9 @@ func (e *fakeEngine) SupportsFeature(_ context.Context, r *pulumirpc.SupportsFea
 func (e *fakeEngine) RegisterResourceHook(_ context.Context, r *pulumirpc.RegisterResourceHookRequest) (*emptypb.Empty, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.rejectHooks != nil {
+		return nil, e.rejectHooks
+	}
 	e.hooks[r.Name] = r
 	return &emptypb.Empty{}, nil
 }
@@ -74,7 +81,7 @@ func (e *fakeEngine) Log(context.Context, *pulumirpc.LogRequest) (*emptypb.Empty
 	return &emptypb.Empty{}, nil
 }
 
-// startEngine serves the fake and points PULUMI_MONITOR at it, as the CLI does for the program.
+// startEngine serves the fake engine and returns its address.
 func startEngine(t *testing.T, supportsHooks bool, cluster []clusterVm) (*fakeEngine, string) {
 	t.Helper()
 	e := &fakeEngine{supportsHooks: supportsHooks, cluster: cluster, hooks: map[string]*pulumirpc.RegisterResourceHookRequest{}}
@@ -87,7 +94,9 @@ func startEngine(t *testing.T, supportsHooks bool, cluster []clusterVm) (*fakeEn
 	pulumirpc.RegisterEngineServer(srv, e)
 	go srv.Serve(l)
 	t.Cleanup(srv.Stop)
-	t.Setenv(pulumi.EnvMonitor, l.Addr().String())
+	// The address reaches the program through RunInfo.MonitorAddr, as in Automation API Go inline
+	// and in pulumi.NewContext; PULUMI_MONITOR is deliberately not set.
+	t.Setenv(pulumi.EnvMonitor, "")
 	return e, l.Addr().String()
 }
 
@@ -198,27 +207,47 @@ func TestHookIsRegisteredPerVmOnTheWire(t *testing.T) {
 	}
 }
 
-// A CLI without hooks must stop the program with a clear error and no VM may be registered:
-// the SDK itself would swallow the rejection and drop the VM in silence.
-func TestCliWithoutHooksFailsClosedAndRegistersNothing(t *testing.T) {
+// A CLI without hooks must stop the program with an error and no VM may be silently left out.
+// This relies on the SDK fork (go.mod replace): the upstream SDK drops the error and the program
+// succeeds with the VM missing.
+func TestCliWithoutHooksFailsAndRegistersNothing(t *testing.T) {
 	e, addr := startEngine(t, false, []clusterVm{{id: 9000, name: "tpl", template: true}})
 
 	err := runAgainstEngine(t, e, addr, []VmData{{Name: "a", NumCpus: 2, Memory: 1024}})
 
-	if err == nil || !strings.Contains(err.Error(), "does not support resource hooks") || !strings.Contains(err.Error(), "NOT registered") {
-		t.Fatalf("want a clear error about resource hooks, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "does not support resource hooks") {
+		t.Fatalf("want an error about resource hooks, got %v", err)
 	}
 	if n := len(e.vmRegistrations()); n != 0 {
 		t.Fatalf("%d VMs registered, want none", n)
 	}
-	if len(e.hooks) != 0 {
-		t.Fatalf("no hook may be registered, got %v", e.hooks)
+}
+
+// supports=true but the engine refuses the hook registration: same requirement.
+func TestRejectedHookRegistrationFailsAndRegistersNothing(t *testing.T) {
+	e, addr := startEngine(t, true, defaultCluster)
+	e.rejectHooks = status.Error(codes.InvalidArgument, "hook registration refused")
+
+	err := runAgainstEngine(t, e, addr, []VmData{{Name: "a", NumCpus: 2, Memory: 1024}, {Name: "b", NumCpus: 2, Memory: 1024}})
+
+	if err == nil || !strings.Contains(err.Error(), "hook registration refused") {
+		t.Fatalf("want the registration error, got %v", err)
+	}
+	if n := len(e.vmRegistrations()); n != 0 {
+		t.Fatalf("%d VMs registered, want none: a VM must never be left out in silence", n)
 	}
 }
 
-func TestMissingMonitorAddressFailsClosed(t *testing.T) {
-	t.Setenv(pulumi.EnvMonitor, "")
-	if err := ensureHooksSupported(context.Background()); err == nil {
-		t.Fatal("without PULUMI_MONITOR the support cannot be confirmed: must fail")
+// The monitor address given in RunInfo works without PULUMI_MONITOR (the whole suite above runs
+// that way); this pins the environment variable to a different, dead address on purpose.
+func TestMonitorFromRunInfoIsUsedNotTheEnvironment(t *testing.T) {
+	e, addr := startEngine(t, true, defaultCluster)
+	t.Setenv(pulumi.EnvMonitor, "127.0.0.1:1")
+
+	if err := runAgainstEngine(t, e, addr, []VmData{{Name: "a", NumCpus: 2, Memory: 1024}}); err != nil {
+		t.Fatalf("the program must use RunInfo.MonitorAddr: %v", err)
+	}
+	if len(e.vmRegistrations()) != 1 {
+		t.Fatal("VM a was not registered")
 	}
 }

@@ -24,6 +24,31 @@ Add this component to your Go project:
 go get github.com/BasisTI/pulumi-proxmox-vms
 ----
 
+=== Pulumi SDK fork (required since v2.9.0)
+
+[[sdk-fork]]
+The template guard (see <<template-guard>>) uses a Pulumi resource hook. The Pulumi Go SDK
+(`github.com/pulumi/pulumi/sdk/v3`, checked in v3.219.0, v3.220.0, v3.224.0 and master) drops the
+error of a failed hook registration in `registerResource`: with a CLI without hooks support, or a
+registration the engine rejects, the VM is silently left out of the program and the program
+succeeds. `BasisTI/pulumi` is a fork of the SDK with the one-line fix (the error is delivered to
+the deferred `endRPC`), tag `sdk/v3.219.0-basis.1` (Go version `v3.219.0-basis.1`; the `sdk/`
+prefix is the tag of a submodule).
+
+*A `replace` in a library module does not apply to the modules that import it.* The `go.mod` of
+this component carries it, but every stack that imports the component needs the same line in its
+own `go.mod`:
+
+[source,go]
+----
+replace github.com/pulumi/pulumi/sdk/v3 => github.com/BasisTI/pulumi/sdk/v3 v3.219.0-basis.1
+----
+
+then `go mod tidy`. The stack should already require `github.com/pulumi/pulumi/sdk/v3 v3.219.0`
+(v3.224.0 is also fine: the replace pins the code to the fork, based on v3.219.0). Without the
+replace the stack compiles against the upstream SDK and a rejected hook registration is silent
+again. Remove the replace when upstream releases the fix.
+
 == Usage
 
 === Basic Usage
@@ -383,11 +408,10 @@ An id left in the stack could then be a running production VM, which a new VM wo
   or the provider data source without an API token). Both are read-only, so a preview works with a
   read-only token. The token must see the template (`VM.Audit` on `/vms/<id>`), or the id counts as
   missing.
-* Requires a Pulumi CLI with resource hooks support. Before registering any VM the component asks
-  the engine (`SupportsFeature("resourceHooks")` at `PULUMI_MONITOR`) and, with an older CLI, fails
-  with "the Pulumi CLI does not support resource hooks ... (the VMs were NOT registered)". It does
-  not rely on `RegisterResourceHook` for this: in the Pulumi Go SDK (checked up to v3.224.0 and
-  master) that rejection is swallowed and the VM would silently be left out of the program.
+* Requires a Pulumi CLI with resource hooks support, and the SDK fork of <<sdk-fork>>. With an
+  older CLI, or a hook registration the engine rejects, the program fails with the engine's error
+  ("the Pulumi CLI does not support resource hooks...") and no VM is registered. With the upstream
+  SDK that failure is swallowed and the VM silently omitted, which is why the replace is required.
 
 == Migrating from vSphere
 

@@ -1,7 +1,6 @@
 package proxmox_vms
 
 import (
-	"context"
 	"reflect"
 	"strings"
 	"sync"
@@ -84,9 +83,8 @@ func runVms(vms []VmData, cluster []clusterVm) (map[string]registeredVm, error) 
 	guards = map[string]func() error{}
 	// The SDK mock monitor has no hook support: capture the guards (logic tests) here; the real
 	// registration is covered through a local gRPC monitor in hooks_grpc_test.go.
-	realGuard, realCheck := newCreateGuard, ensureHooksSupported
-	defer func() { newCreateGuard, ensureHooksSupported = realGuard, realCheck }()
-	ensureHooksSupported = func(context.Context) error { return nil }
+	realGuard := newCreateGuard
+	defer func() { newCreateGuard = realGuard }()
 	newCreateGuard = func(_ *pulumi.Context, name string, fn func() error) (pulumi.ResourceOption, error) {
 		guards[strings.TrimPrefix(name, "template-guard-")] = fn
 		return pulumi.Protect(true), nil
