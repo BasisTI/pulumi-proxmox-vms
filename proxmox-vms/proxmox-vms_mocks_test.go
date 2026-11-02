@@ -1,6 +1,7 @@
 package proxmox_vms
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"sync"
@@ -64,13 +65,6 @@ func (m *vmMocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
 // hook of the VMs it declares as being created (a VM already in the state has no create step).
 var guards map[string]func() error
 
-func init() {
-	newCreateGuard = func(_ *pulumi.Context, name string, fn func() error) (pulumi.ResourceOption, error) {
-		guards[strings.TrimPrefix(name, "template-guard-")] = fn
-		return pulumi.Protect(true), nil
-	}
-}
-
 // defaultCluster has the shared template 9000 only.
 var defaultCluster = []clusterVm{{id: 9000, name: "ubuntu-template", template: true}}
 
@@ -88,6 +82,15 @@ func registerVms(t *testing.T, vms []VmData) map[string]registeredVm {
 func runVms(vms []VmData, cluster []clusterVm) (map[string]registeredVm, error) {
 	mocks := &vmMocks{vms: map[string]registeredVm{}, cluster: cluster}
 	guards = map[string]func() error{}
+	// The SDK mock monitor has no hook support: capture the guards (logic tests) here; the real
+	// registration is covered through a local gRPC monitor in hooks_grpc_test.go.
+	realGuard, realCheck := newCreateGuard, ensureHooksSupported
+	defer func() { newCreateGuard, ensureHooksSupported = realGuard, realCheck }()
+	ensureHooksSupported = func(context.Context) error { return nil }
+	newCreateGuard = func(_ *pulumi.Context, name string, fn func() error) (pulumi.ResourceOption, error) {
+		guards[strings.TrimPrefix(name, "template-guard-")] = fn
+		return pulumi.Protect(true), nil
+	}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		_, err := NewProxmoxVms(ctx, "test", &ProxmoxVmsArgs{
 			Vms: vms,

@@ -1,12 +1,18 @@
 package proxmox_vms
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"sort"
+	"time"
 
 	"github.com/muhlba91/pulumi-proxmoxve/sdk/v7/go/proxmoxve/vm"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/config"
+	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // VmData defines the structure for a virtual machine's data.
@@ -96,6 +102,11 @@ func NewProxmoxVms(ctx *pulumi.Context, name string, args *ProxmoxVmsArgs, opts 
 	proxmoxVms := &ProxmoxVms{}
 	err := ctx.RegisterComponentResource("pkg:index:ProxmoxVms", name, proxmoxVms, opts...)
 	if err != nil {
+		return nil, err
+	}
+
+	// Before any VM is registered: see ensureHooksSupported.
+	if err := ensureHooksSupported(ctx.Context()); err != nil {
 		return nil, err
 	}
 
@@ -286,8 +297,11 @@ func listProxmoxVms(ctx *pulumi.Context) ([]vm.GetVirtualMachinesVm, error) {
 // in the cluster is wrong both ways: a namesake (another stack, a manual VM) hides a real
 // creation, and renaming a VM in the stack (a new URN, so a real create) would be judged by the
 // old name. A BeforeCreate hook runs exactly when the engine is about to create the resource; for
-// a resource that exists in the state there is no create step, so the hook does not run and an
-// orphan id of a live VM never breaks a routine preview.
+// a resource that exists in the state and is only kept or updated (same/update/delete steps) there
+// is no create step, so the hook does not run and an orphan id of a live VM never breaks a routine
+// preview. Every create does run it, replacements included (a rename or any replace clones again
+// and needs a current template). With delete-before-create the refusal can come after the delete,
+// so the preview, where the hook also runs, is the time to catch it.
 //
 // The hook closes over the listing already made for the node lookup: no extra call.
 func templateGuardOption(ctx *pulumi.Context, found []vm.GetVirtualMachinesVm, vmData VmData, proxmoxCfg ProxmoxCfg) (pulumi.ResourceOption, error) {
@@ -295,6 +309,40 @@ func templateGuardOption(ctx *pulumi.Context, found []vm.GetVirtualMachinesVm, v
 	return newCreateGuard(ctx, "template-guard-"+vmData.Name, func() error {
 		return checkTemplate(found, vmData.Name, id)
 	})
+}
+
+// ensureHooksSupported fails the program, with a clear error, when the Pulumi CLI does not support
+// resource hooks. It must run before any VM is registered, and it must not rely on
+// RegisterResourceHook: in pulumi sdk v3 up to master (checked in v3.219.0, v3.220.0, v3.224.0
+// and master) a CLI without hooks rejects the registration asynchronously, and registerResource
+// drops that error (context.go: `mHooks, hooksErr := marshalResourceHooks(...)`; `return` without
+// assigning err), so the VM is silently left out of the registrations and the program ends with
+// success. With a VM already in the state the engine could then plan its deletion.
+//
+// So the support is asked to the engine directly, the same SupportsFeature call the SDK makes,
+// at the address the CLI gives the program in PULUMI_MONITOR. Any failure to ask is an error.
+// It is a variable so the unit tests, which run under the SDK mocks, can replace it.
+var ensureHooksSupported = func(ctx context.Context) error {
+	addr := os.Getenv(pulumi.EnvMonitor)
+	if addr == "" {
+		return fmt.Errorf("cannot check that the Pulumi CLI supports resource hooks: %s is not set", pulumi.EnvMonitor)
+	}
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return fmt.Errorf("cannot check that the Pulumi CLI supports resource hooks: %w", err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	resp, err := pulumirpc.NewResourceMonitorClient(conn).SupportsFeature(ctx, &pulumirpc.SupportsFeatureRequest{Id: "resourceHooks"})
+	if err != nil {
+		return fmt.Errorf("cannot check that the Pulumi CLI supports resource hooks: %w", err)
+	}
+	if !resp.GetHasSupport() {
+		return fmt.Errorf("the Pulumi CLI does not support resource hooks, which the template guard of pulumi-proxmox-vms needs; " +
+			"update the Pulumi CLI (the VMs were NOT registered)")
+	}
+	return nil
 }
 
 // newCreateGuard registers fn as a BeforeCreate hook, run on preview too. A non-nil error from a

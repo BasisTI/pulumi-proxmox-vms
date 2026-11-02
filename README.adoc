@@ -371,17 +371,23 @@ An id left in the stack could then be a running production VM, which a new VM wo
 
 * The check is a Pulumi `BeforeCreate` resource hook (also run on preview), so it fires exactly when
   the engine is about to create the resource: the engine, not the program, knows what is in the
-  state. Existing VMs have no create step, so the hook does not run for them and an orphan id of a
-  live VM (or an id gone altogether) never breaks a routine preview. A namesake VM in the cluster
+  state. A VM that is only kept, updated or deleted (same/update/delete steps) has no create step,
+  so the hook does not run for it and an orphan id of a live VM (or an id gone altogether) never
+  breaks a routine preview. A namesake VM in the cluster
   (another stack, a manual VM) does not lift the check.
-* Renaming a VM in the stack is a new resource (new URN), hence a real creation that clones
-  `templateVmId`: the check applies to it, so keep a current template id when renaming.
+* Every create is checked, replacements included: renaming a VM in the stack (new URN) or any
+  change that replaces it clones again, so it needs a current template id. With
+  delete-before-create the refusal can come after the delete; the hook also runs on preview, which
+  is the time to catch it, so always read the preview first.
 * No extra call: the hook reuses the listing already made for node discovery (`/cluster/resources`,
   or the provider data source without an API token). Both are read-only, so a preview works with a
   read-only token. The token must see the template (`VM.Audit` on `/vms/<id>`), or the id counts as
   missing.
-* Requires a Pulumi CLI with resource hooks support (the SDK in `go.mod`, v3.219.0, already has
-  them). With an older CLI the program fails with "the Pulumi CLI does not support resource hooks".
+* Requires a Pulumi CLI with resource hooks support. Before registering any VM the component asks
+  the engine (`SupportsFeature("resourceHooks")` at `PULUMI_MONITOR`) and, with an older CLI, fails
+  with "the Pulumi CLI does not support resource hooks ... (the VMs were NOT registered)". It does
+  not rely on `RegisterResourceHook` for this: in the Pulumi Go SDK (checked up to v3.224.0 and
+  master) that rejection is swallowed and the VM would silently be left out of the program.
 
 == Migrating from vSphere
 
